@@ -1,0 +1,2 @@
+# amaam
+Novel Quantitative Model
