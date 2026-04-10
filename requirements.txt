@@ -2,6 +2,7 @@ numpy>=1.24
 pandas>=2.0
 scipy>=1.10
 yfinance>=0.2.30
+exchange-calendars>=4.2
 matplotlib>=3.7
 plotly>=5.15
 pytest>=7.0
@@ -9,3 +10,6 @@ pytest-cov>=4.0
 pyyaml>=6.0
 tqdm>=4.65
 python-dotenv>=1.0
+
+# Phase 9 (live trading) — install separately when needed:
+# schwab-py>=1.0

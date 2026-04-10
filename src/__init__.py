@@ -1,0 +1,1 @@
+"""AMAAM source package."""
