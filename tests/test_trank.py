@@ -24,7 +24,7 @@ from src.ranking.trank import compute_trank, rank_assets, select_top_n
 # ---------------------------------------------------------------------------
 
 def _cfg() -> ModelConfig:
-    """Default config: wM=0.50, wV=0.25, wC=0.25, wT=1.0."""
+    """Default config: wM=0.65, wV=0.25, wC=0.10, wT=1.0."""
     return ModelConfig()
 
 
@@ -85,16 +85,20 @@ class TestComputeTrank:
         """
         Hand-calculated TRank for a 3-asset sleeve where A dominates all factors.
 
-        Setup (all T = −2, wM=0.50, wV=0.25, wC=0.25, wT=1.0):
+        Setup (all T = −2, wM=0.65, wV=0.25, wC=0.10, wT=1.0):
           Asset   M      V     C
           A      0.20   0.10  0.10   →  Rank(M)=3, Rank(V)=3, Rank(C)=3
           B      0.10   0.20  0.20   →  Rank(M)=2, Rank(V)=2, Rank(C)=2
           C      0.05   0.30  0.30   →  Rank(M)=1, Rank(V)=1, Rank(C)=1
 
-        TRank_A = 0.50·3 + 0.25·3 + 0.25·3 − 1.0·(−2) + 0.20/3
-                = 1.5 + 0.75 + 0.75 + 2.0 + 0.0667 = 5.0 + 0.20/3
-        TRank_B = 4.0 + 0.10/3
-        TRank_C = 3.0 + 0.05/3
+        Because all three ranks are identical for each asset, the weighted sum
+        collapses to (wM + wV + wC) · rank = 1.0 · rank regardless of weights:
+        TRank_A = 1.0·3 − 1.0·(−2) + 0.20/3 = 3 + 2 + 0.20/3  → 5 + 0.20/3
+        TRank_B = 1.0·2 + 2 + 0.10/3         → 4 + 0.10/3
+        TRank_C = 1.0·1 + 2 + 0.05/3         → 3 + 0.05/3
+
+        Subtracting the T contribution (−(−2) = +2 per asset):
+        TRank_A = 1.0 + 0.20/3,  TRank_B = 0.0 + 0.10/3,  TRank_C = −1.0 + 0.05/3
         """
         cfg = _cfg()
         m_raw = _s({"A": 0.20, "B": 0.10, "C": 0.05})
@@ -108,15 +112,17 @@ class TestComputeTrank:
 
         tranks = compute_trank(m_ranks, v_ranks, c_ranks, t_raw, m_raw, cfg)
 
-        assert tranks["A"] == pytest.approx(5.0 + 0.20 / 3, rel=1e-6)
-        assert tranks["B"] == pytest.approx(4.0 + 0.10 / 3, rel=1e-6)
-        assert tranks["C"] == pytest.approx(3.0 + 0.05 / 3, rel=1e-6)
+        # With T = −2 and + wT·T: contribution = +1.0·(−2) = −2 per asset.
+        # Weighted rank sum for A: 0.65·3 + 0.25·3 + 0.10·3 = 3.0, plus −2 = 1.0.
+        assert tranks["A"] == pytest.approx(1.0 + 0.20 / 3, rel=1e-6)
+        assert tranks["B"] == pytest.approx(0.0 + 0.10 / 3, rel=1e-6)
+        assert tranks["C"] == pytest.approx(-1.0 + 0.05 / 3, rel=1e-6)
         assert tranks["A"] > tranks["B"] > tranks["C"]
 
-    def test_t_plus_two_lowers_trank_by_two_wt(self):
+    def test_t_plus_two_raises_trank_by_two_wt(self):
         """
-        T = +2 reduces TRank relative to T = −2 by exactly 2·wT per asset.
-        With default wT = 1.0 the penalty is 4 points (from +2 to −2 of −wT·T).
+        T = +2 raises TRank relative to T = −2 by exactly 2·wT per asset.
+        With default wT = 1.0 the bonus is 4 points (from +wT·(+2) vs +wT·(−2)).
         """
         cfg = _cfg()
         ranks = _s({"A": 3.0})
@@ -125,7 +131,7 @@ class TestComputeTrank:
         down = compute_trank(ranks, ranks, ranks, _s({"A": -2.0}), m_raw, cfg)
         up   = compute_trank(ranks, ranks, ranks, _s({"A": +2.0}), m_raw, cfg)
 
-        assert down["A"] - up["A"] == pytest.approx(4.0 * cfg.weight_trend)
+        assert up["A"] - down["A"] == pytest.approx(4.0 * cfg.weight_trend)
 
     def test_m_over_n_tiebreaker_is_present(self):
         """
@@ -143,7 +149,7 @@ class TestComputeTrank:
             cfg.weight_momentum * 1.0
             + cfg.weight_volatility * 1.0
             + cfg.weight_correlation * 1.0
-            - cfg.weight_trend * (-2.0)
+            + cfg.weight_trend * (-2.0)
         )
         assert trank["A"] == pytest.approx(base + 0.30 / 1, rel=1e-9)
 
@@ -181,29 +187,35 @@ class TestTiebreakerResolution:
         Two assets with equal weighted-rank sums differ only in raw M.
         The one with higher M must win.
 
-        Engineered tie (n=2, default weights):
-          A: Rank(M)=1, Rank(V)=2, Rank(C)=2 → base = 0.5·1 + 0.25·2 + 0.25·2 = 1.5
-          B: Rank(M)=2, Rank(V)=1, Rank(C)=1 → base = 0.5·2 + 0.25·1 + 0.25·1 = 1.5
+        Engineered tie (n=4, wM=0.65, wV=0.25, wC=0.10):
+          A: Rank(M)=1, Rank(V)=4, Rank(C)=1
+             base = 0.65·1 + 0.25·4 + 0.10·1 = 0.65 + 1.00 + 0.10 = 1.75
+          B: Rank(M)=2, Rank(V)=1, Rank(C)=2
+             base = 0.65·2 + 0.25·1 + 0.10·2 = 1.30 + 0.25 + 0.20 = 1.75
 
         Equal base and equal T; raw M decides: B has M=0.10 > A's M=0.05.
-        Expected: TRank_B − TRank_A = (0.10 − 0.05) / 2.
+        Expected: TRank_B − TRank_A = (0.10 − 0.05) / 4.
+
+        C and D are dummy assets that provide the rank context; only A and B
+        are checked in the assertions.
         """
         cfg = _cfg()
-        # A: lower M, lower V (good rank), lower C (good rank).
-        # B: higher M, higher V (bad rank), higher C (bad rank) — ranks balance.
-        m_raw = _s({"A": 0.05, "B": 0.10})
-        v_raw = _s({"A": 0.10, "B": 0.20})
-        c_raw = _s({"A": 0.20, "B": 0.40})
-        t_raw = _s({"A": -2.0, "B": -2.0})
+        # M ascending: A(0.05)=1, B(0.10)=2, C(0.20)=3, D(0.30)=4
+        m_raw = _s({"A": 0.05, "B": 0.10, "C": 0.20, "D": 0.30})
+        # V ascending=False (lower=better): A(0.10)=4, C(0.20)=3, D(0.30)=2, B(0.40)=1
+        v_raw = _s({"A": 0.10, "C": 0.20, "D": 0.30, "B": 0.40})
+        # C ascending=False (lower=better): C(0.10)=4, D(0.20)=3, B(0.30)=2, A(0.40)=1
+        c_raw = _s({"C": 0.10, "D": 0.20, "B": 0.30, "A": 0.40})
+        t_raw = _s({"A": -2.0, "B": -2.0, "C": -2.0, "D": -2.0})
 
-        m_ranks = rank_assets(m_raw, ascending=True)   # A=1, B=2
-        v_ranks = rank_assets(v_raw, ascending=False)  # A=2, B=1
-        c_ranks = rank_assets(c_raw, ascending=False)  # A=2, B=1
+        m_ranks = rank_assets(m_raw, ascending=True)
+        v_ranks = rank_assets(v_raw, ascending=False)
+        c_ranks = rank_assets(c_raw, ascending=False)
 
         tranks = compute_trank(m_ranks, v_ranks, c_ranks, t_raw, m_raw, cfg)
 
         assert tranks["B"] > tranks["A"]
-        assert tranks["B"] - tranks["A"] == pytest.approx((0.10 - 0.05) / 2, rel=1e-9)
+        assert tranks["B"] - tranks["A"] == pytest.approx((0.10 - 0.05) / 4, rel=1e-9)
 
     def test_tiebreaker_divisor_is_n_assets(self):
         """
@@ -331,10 +343,10 @@ class TestRankingDirection:
         )
         assert tranks["A"] > tranks["B"]
 
-    def test_t_plus_two_lowers_trank_vs_identical_peer(self):
+    def test_t_plus_two_raises_trank_vs_identical_peer(self):
         """
-        An asset with T = +2 scores lower than an identical peer at T = −2,
-        per the −wT·T term (rare upside breakout treated as overextension).
+        An asset with T = +2 scores higher than an identical peer at T = −2,
+        per the +wT·T term (uptrend confirmation boosts TRank → more likely selected).
         """
         cfg = _cfg()
         m, v, c, t = self._baseline()
@@ -345,4 +357,4 @@ class TestRankingDirection:
             rank_assets(c, ascending=False),
             t, m, cfg,
         )
-        assert tranks["A"] < tranks["B"]
+        assert tranks["A"] > tranks["B"]

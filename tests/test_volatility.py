@@ -246,11 +246,11 @@ class TestZeroReturns:
 
 class TestComputeVolatilityAllAssets:
     def test_returns_dataframe_correct_shape(self):
-        cfg = ModelConfig()
-        cfg_small = ModelConfig(
-            volatility_init_window=5,
-            volatility_smoothing=3,
-        )
+        # Use a short yang_zhang_window so the test data (40 rows) is long
+        # enough to produce at least some non-NaN values.  The legacy EWMA
+        # parameters (volatility_init_window, volatility_smoothing) are not
+        # used by compute_volatility_all_assets which routes to Yang-Zhang.
+        cfg_small = ModelConfig(yang_zhang_window=10)
         log_rets = [0.01 * ((-1) ** i) for i in range(40)]
         prices = _prices_from_returns(log_rets)
         df = pd.DataFrame({"Open": prices, "High": prices, "Low": prices,

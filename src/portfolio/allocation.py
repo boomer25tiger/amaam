@@ -176,7 +176,8 @@ def compute_monthly_allocation(
     config : ModelConfig
         Model configuration supplying ``weighting_scheme``.
     main_volatility : pd.Series, optional
-        EWMA volatility values for main sleeve tickers.  Required when
+        Yang-Zhang (or alternative) annualised volatility values for main
+        sleeve tickers.  Required when
         ``config.weighting_scheme == "inverse_volatility"``.
     hedging_volatility : pd.Series, optional
         Reserved for future use; hedging sleeve always uses equal-slot
