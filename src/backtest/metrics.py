@@ -122,6 +122,18 @@ def compute_all_metrics(
         else:
             cur_dur = 0
 
+    # ── Sortino ratio ───────────────────────────────────────────────────────
+    # Uses downside deviation (std of returns below the risk-free hurdle) rather
+    # than total std, so it penalises only harmful volatility.  This is more
+    # appropriate for asymmetric return distributions like AMAAM, which truncates
+    # large losses via the momentum filter but still has a fat left tail.
+    downside_returns = excess_returns[excess_returns < 0]
+    if len(downside_returns) > 0:
+        downside_dev = float(math.sqrt((downside_returns ** 2).mean()) * math.sqrt(periods_per_year))
+        sortino = float(ann_return - risk_free_rate) / downside_dev if downside_dev > 0 else float("nan")
+    else:
+        sortino = float("nan")
+
     # ── Per-period extremes ─────────────────────────────────────────────────
     best_month = float(returns.max())
     worst_month = float(returns.min())
@@ -143,6 +155,7 @@ def compute_all_metrics(
         "Annualized Return":        ann_return,
         "Annualized Volatility":    ann_vol,
         "Sharpe Ratio":             sharpe,
+        "Sortino Ratio":            sortino,
         "Calmar Ratio":             calmar,
         "Max Drawdown":             max_dd,
         "Max Drawdown Duration":    float(max_dd_dur),
