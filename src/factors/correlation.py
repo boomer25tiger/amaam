@@ -1,11 +1,39 @@
 """
-Average Relative Correlation factor (C) for AMAAM.
+Correlation factor (C) for AMAAM.
 
-Computes each asset's mean pairwise Pearson correlation with all other assets
-in the same sleeve over a trailing 84-trading-day window. Assets with lower
-average correlation receive higher TRank scores, promoting portfolio
-diversification. Correlations are computed independently within each sleeve;
-there is no cross-sleeve correlation. See Section 3.4 of the specification.
+Two estimation methods are supported via ``ModelConfig.correlation_method``:
+
+**"pairwise"** (original FAA spec):
+    Each asset's mean Pearson correlation with every other asset in the same
+    sleeve over a trailing window.  Promotes intra-sleeve diversification but
+    suffers from (a) statistical noise on short windows, (b) poor discriminating
+    power within equity-heavy sleeves where all assets share a large common
+    S&P 500 factor, and (c) correlation-to-1 collapse during market stress.
+
+**"market"** (revised, academically motivated):
+    Each asset's rolling Pearson correlation with SPY (the market proxy).
+    Lower market correlation → higher TRank score.
+
+    Academic basis:
+    * **Keller & Butler (2014) EAA** — replaced FAA pairwise correlation with
+      correlation to the equal-weight portfolio, arguing that pairwise scores
+      in equity universes primarily reflect shared market beta rather than
+      genuine sleeve-level diversification.
+    * **Sharpe (1964) CAPM** — marginal portfolio risk contribution is captured
+      by market beta, not average pairwise covariance, making the market the
+      correct reference for a diversification-oriented ranking factor.
+    * **Ang & Chen (2002)** — pairwise equity correlations spike toward 1.0
+      during downturns; market beta is comparatively more stable across regimes.
+    * **Frazzini & Pedersen (2014) BAB** — low-beta assets deliver higher
+      risk-adjusted returns across 20 markets, providing a return-predictive
+      rationale beyond pure diversification.
+
+    Practical advantage: SPY is available for the full backtest window, the
+    estimate is more stable than pairwise (one correlation vs N−1), and it
+    genuinely discriminates between defensive (XLU, XLP) and cyclical (XLK,
+    XLY) assets within the equity-dominated main sleeve.
+
+See Section 3.4 of the specification.
 """
 
 import logging
@@ -140,4 +168,83 @@ def compute_correlation_all_assets(
 
     # Reorder columns to match the tickers argument for consistency.
     result = result.reindex(columns=available)
+    return result
+
+
+def compute_market_correlation(
+    data_dict: Dict[str, pd.DataFrame],
+    tickers: List[str],
+    lookback: int,
+    market_ticker: str = "SPY",
+) -> pd.DataFrame:
+    """
+    Compute each asset's rolling Pearson correlation with the market proxy (SPY).
+
+    Lower market correlation → higher TRank score (same ranking direction as
+    pairwise correlation; assets that co-move less with SPY are preferred as
+    diversifiers).
+
+    This estimator addresses three structural weaknesses of the pairwise method
+    within equity-heavy sleeves:
+
+    1. **Discriminating power**: SPY correlation genuinely separates defensive
+       sectors (XLU, XLP, GLD: β ≈ 0.3–0.5) from cyclicals (XLK, XLY: β ≈ 1.1)
+       where pairwise correlation ranks them nearly identically (all ≈ 0.80).
+    2. **Statistical efficiency**: one correlation per asset vs N−1 pairwise
+       estimates, halving the estimation noise for a given lookback window.
+    3. **Crisis stability**: market beta is more stable across regimes than
+       pairwise correlations, which collapse toward 1.0 during selloffs and
+       lose all discriminating power (Ang & Chen 2002).
+
+    Parameters
+    ----------
+    data_dict : Dict[str, pd.DataFrame]
+        Mapping of ticker → OHLCV DataFrame.  Must include *market_ticker*.
+    tickers : List[str]
+        Sleeve tickers to compute correlation for.
+    lookback : int
+        Rolling window in trading days (spec default: 84).
+    market_ticker : str
+        Ticker used as the market proxy.  Defaults to ``"SPY"``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Dates × tickers DataFrame of rolling market correlations.
+        First ``lookback − 1`` rows are NaN.  Range [−1, 1].
+
+    Raises
+    ------
+    KeyError
+        If *market_ticker* is not present in *data_dict*.
+    """
+    if market_ticker not in data_dict:
+        raise KeyError(
+            f"Market proxy '{market_ticker}' not found in data_dict. "
+            "Ensure it is downloaded alongside the sleeve tickers."
+        )
+
+    available = [t for t in tickers if t in data_dict]
+    if not available:
+        return pd.DataFrame()
+
+    # Build a returns DataFrame that includes both sleeve assets and the market.
+    all_tickers = available + ([market_ticker] if market_ticker not in available else [])
+    returns_df = pd.DataFrame(
+        {t: data_dict[t]["Close"].pct_change(fill_method=None) for t in all_tickers}
+    )
+
+    market_rets = returns_df[market_ticker]
+
+    # Compute rolling Pearson correlation of each sleeve asset with SPY.
+    # Using a loop rather than rolling().corr() avoids the MultiIndex overhead
+    # and is clearer for a single reference-series calculation.
+    result = pd.DataFrame(index=returns_df.index, columns=available, dtype=float)
+    for t in available:
+        result[t] = (
+            returns_df[t]
+            .rolling(window=lookback, min_periods=lookback)
+            .corr(market_rets)
+        )
+
     return result

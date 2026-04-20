@@ -8,6 +8,7 @@ and the rationale behind each default value.
 """
 
 from dataclasses import dataclass, field
+from typing import List
 
 
 @dataclass
@@ -18,7 +19,18 @@ class ModelConfig:
 
     # ~4 calendar months; used for both the Absolute Momentum ROC and the
     # Average Relative Correlation window (Sections 3.2 and 3.4).
+    # Only used when momentum_blend is False.
     momentum_lookback: int = 84
+
+    # When True, replace the single 4-month ROC with an equal-weight average
+    # of ROC across the four horizons in momentum_blend_lookbacks.  Averaging
+    # across 1/3/6/12-month windows reduces single-lookback sensitivity and
+    # captures momentum at both short and long time scales (Faber 2007).
+    momentum_blend: bool = False
+
+    # Trading-day lookbacks used when momentum_blend = True.
+    # 21 ≈ 1 month, 63 ≈ 3 months, 126 ≈ 6 months, 252 ≈ 12 months.
+    momentum_blend_lookbacks: List[int] = field(default_factory=lambda: [21, 63, 126, 252])
 
     # RiskMetrics daily exponential decay factor (Zangari 1996).
     # Controls how quickly old observations lose influence in the EWMA variance.
@@ -31,6 +43,14 @@ class ModelConfig:
     # Trailing window for the correlation matrix (Section 3.4).
     # Kept equal to momentum_lookback so both factors share the same horizon.
     correlation_lookback: int = 84
+
+    # Correlation estimation method (Section 3.4):
+    #   "pairwise" — original FAA average pairwise Pearson (default)
+    #   "market"   — rolling Pearson correlation with SPY (market proxy);
+    #                better discriminating power in equity sleeves and more
+    #                stable estimates during market stress (Keller & Butler 2014,
+    #                Ang & Chen 2002, Frazzini & Pedersen 2014).
+    correlation_method: str = "pairwise"
 
     # Simple-moving-average window for True Range used in the Keltner Channel
     # bands (Section 3.5).  Spec formula: ATR_t = (1/42) Σ_{i=0}^{41} TR_{t-i}.

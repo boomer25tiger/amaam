@@ -23,8 +23,11 @@ from config.etf_universe import (
     MAIN_SLEEVE_TICKERS,
 )
 from src.backtest.metrics import compute_all_metrics
-from src.factors.correlation import compute_correlation_all_assets
-from src.factors.momentum import compute_absolute_momentum
+from src.factors.correlation import (
+    compute_correlation_all_assets,
+    compute_market_correlation,
+)
+from src.factors.momentum import compute_absolute_momentum, compute_blended_momentum
 from src.factors.trend import compute_trend_signal
 from src.factors.volatility import compute_volatility_all_assets
 from src.portfolio.allocation import compute_monthly_allocation
@@ -131,10 +134,20 @@ def _precompute_factors(
     all_tickers = main_tickers + hedge_tickers
     logger.info("Pre-computing factor series for %d tickers…", len(all_tickers))
 
-    momentum = pd.DataFrame({
-        t: compute_absolute_momentum(data_dict[t]["Close"], config.momentum_lookback)
-        for t in all_tickers
-    })
+    # Use blended 1/3/6/12-month average when configured; otherwise the
+    # standard single 4-month ROC from the original spec (Section 3.2).
+    if config.momentum_blend:
+        momentum = pd.DataFrame({
+            t: compute_blended_momentum(
+                data_dict[t]["Close"], config.momentum_blend_lookbacks
+            )
+            for t in all_tickers
+        })
+    else:
+        momentum = pd.DataFrame({
+            t: compute_absolute_momentum(data_dict[t]["Close"], config.momentum_lookback)
+            for t in all_tickers
+        })
 
     # Yang-Zhang requires OHLC; pass the full per-ticker DataFrames.
     volatility = compute_volatility_all_assets(
@@ -149,17 +162,27 @@ def _precompute_factors(
         for t in all_tickers
     })
 
-    corr_main = compute_correlation_all_assets(
-        {t: data_dict[t] for t in main_tickers},
-        main_tickers,
-        config.correlation_lookback,
-    )
-
-    corr_hedge = compute_correlation_all_assets(
-        {t: data_dict[t] for t in hedge_tickers},
-        hedge_tickers,
-        config.correlation_lookback,
-    )
+    # Dispatch to the configured correlation estimator.  "market" uses rolling
+    # Pearson correlation with SPY, which discriminates better within the
+    # equity-heavy main sleeve than average pairwise correlation (Section 3.4).
+    if config.correlation_method == "market":
+        corr_main = compute_market_correlation(
+            data_dict, main_tickers, config.correlation_lookback,
+        )
+        corr_hedge = compute_market_correlation(
+            data_dict, hedge_tickers, config.correlation_lookback,
+        )
+    else:
+        corr_main = compute_correlation_all_assets(
+            {t: data_dict[t] for t in main_tickers},
+            main_tickers,
+            config.correlation_lookback,
+        )
+        corr_hedge = compute_correlation_all_assets(
+            {t: data_dict[t] for t in hedge_tickers},
+            hedge_tickers,
+            config.correlation_lookback,
+        )
 
     return {
         "momentum":  momentum,
