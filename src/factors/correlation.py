@@ -50,8 +50,6 @@ def compute_average_relative_correlation(
         ticker has fewer than *lookback* prior returns.
     """
     # Build returns DataFrame for the lookback window ending on date.
-    # Using .loc with a slice stops at the first index entry that matches
-    # date; this is safe because the data is calendar-aligned.
     window_returns = pd.DataFrame(
         {t: returns_dict[t] for t in tickers if t in returns_dict}
     )
@@ -117,7 +115,7 @@ def compute_correlation_all_assets(
         return pd.DataFrame()
 
     # Simple returns are used for Pearson correlation; the choice between log
-    # and simple returns is immaterial for correlation because the scaling
+    # and simple returns is immaterial for correlation  because the scaling
     # cancels out in the Pearson formula.
     returns_df = pd.DataFrame(
         {t: data_dict[t]["Close"].pct_change(fill_method=None) for t in available}

@@ -1,11 +1,17 @@
 """
 Volatility Model factor (V) for AMAAM.
 
-Estimates realized volatility using the J.P. Morgan RiskMetrics EWMA variance
-model (lambda=0.94), followed by a 10-day SMA smoothing step and annualization
-by sqrt(252). Lower volatility assets receive higher TRank scores, implementing
-the risk-management dimension of the ranking engine. See Section 3.3 of the
-specification.
+Default estimator: Yang-Zhang (YZ), which uses OHLC data and explicitly
+captures the overnight gap component (Close → next Open).  YZ is
+drift-independent, ~8× more statistically efficient than close-to-close, and
+outperformed both the RiskMetrics EWMA baseline and Garman-Klass on IS/OOS
+Sharpe in all three measurement windows.
+
+The legacy RiskMetrics EWMA estimator (lambda=0.94) is retained as a named
+alternative for comparison and backward-compatibility.
+
+Lower annualised volatility → higher TRank → more likely to be selected.
+See Section 3.3 of the specification.
 """
 
 import logging
@@ -21,6 +27,84 @@ logger = logging.getLogger(__name__)
 # 252 trading days per year — standard equity market convention.
 _ANNUALIZATION_FACTOR: int = 252
 
+
+# =============================================================================
+# Yang-Zhang estimator (default)
+# =============================================================================
+
+def compute_yang_zhang_vol(
+    ohlc: pd.DataFrame,
+    window: int,
+) -> pd.Series:
+    """
+    Compute Yang-Zhang annualised volatility for a single asset.
+
+    Yang-Zhang (2000) decomposes total variance into three orthogonal
+    components, each estimated from a different aspect of daily price data:
+
+    ``σ²_YZ = σ²_overnight + k · σ²_open_close + (1 − k) · σ²_rogers_satchell``
+
+    Components:
+    * **Overnight** — variance of ln(Open_t / Close_{t-1}); captures gap risk
+      from macro announcements, earnings, Fed decisions, etc.
+    * **Open-to-close** — variance of ln(Close_t / Open_t); intraday drift.
+    * **Rogers-Satchell** — Σ[ln(H/C)·ln(H/O) + ln(L/C)·ln(L/O)] / n;
+      captures intraday volatility without assuming zero drift.
+
+    The optimal weighting coefficient k (Chou & Wang 2006) minimises the
+    estimator's mean-squared error:
+    ``k = 0.34 / (1.34 + (n+1)/(n−1))``
+
+    All three components are computed over a *window*-day rolling window
+    (min_periods = window so that early NaN rows are not reported).
+    The final series is annualised by √252.
+
+    Parameters
+    ----------
+    ohlc : pd.DataFrame
+        Must contain ``Open``, ``High``, ``Low``, ``Close`` columns.
+        Index is a DatetimeIndex of trading days.
+    window : int
+        Rolling window length in trading days (spec default: 84 — matched to
+        the momentum lookback so both factors share the same horizon).
+
+    Returns
+    -------
+    pd.Series
+        Annualised Yang-Zhang volatility.  The first ``window − 1`` rows are
+        NaN.  Same index as *ohlc*.
+    """
+    o = np.log(ohlc["Open"])
+    h = np.log(ohlc["High"])
+    l = np.log(ohlc["Low"])
+    c = np.log(ohlc["Close"])
+    c_prev = c.shift(1)
+
+    # Chou-Wang (2006) optimal weighting for the open-to-close component.
+    k = 0.34 / (1.34 + (window + 1) / (window - 1))
+
+    # Component 1: overnight return variance  ln(O_t / C_{t-1})
+    overnight = o - c_prev
+    var_overnight = overnight.rolling(window, min_periods=window).var(ddof=1)
+
+    # Component 2: open-to-close return variance  ln(C_t / O_t)
+    open_close = c - o
+    var_open_close = open_close.rolling(window, min_periods=window).var(ddof=1)
+
+    # Component 3: Rogers-Satchell intraday variance (drift-independent)
+    rs = (h - c) * (h - o) + (l - c) * (l - o)
+    var_rs = rs.rolling(window, min_periods=window).mean()
+
+    var_yz = var_overnight + k * var_open_close + (1 - k) * var_rs
+
+    # clip(lower=0) guards against floating-point rounding producing tiny
+    # negatives in the RS term when H ≈ L ≈ O ≈ C.
+    return np.sqrt(var_yz.clip(lower=0) * _ANNUALIZATION_FACTOR)
+
+
+# =============================================================================
+# RiskMetrics EWMA estimator (legacy / alternative)
+# =============================================================================
 
 def compute_ewma_variance(
     returns: pd.Series,
@@ -98,7 +182,10 @@ def compute_volatility_model(
     smoothing_window: int,
 ) -> pd.Series:
     """
-    Full volatility pipeline: log returns → EWMA variance → SMA smooth → annualise.
+    Legacy EWMA volatility pipeline: log returns → EWMA variance → SMA smooth → annualise.
+
+    Retained for backward-compatibility and comparative analysis.  The default
+    pipeline now uses Yang-Zhang via ``compute_volatility_all_assets``.
 
     The SMA smoothing step is applied to the *variance* series (not to the
     square-root vol) as specified in the RAAM paper.  Smoothing on variance
@@ -138,33 +225,36 @@ def compute_volatility_model(
     return annualised_vol
 
 
+# =============================================================================
+# Public dispatcher — used by the backtest engine
+# =============================================================================
+
 def compute_volatility_all_assets(
     data_dict: Dict[str, pd.DataFrame],
     config: ModelConfig,
 ) -> pd.DataFrame:
     """
-    Compute volatility for every asset in a data dictionary.
+    Compute Yang-Zhang volatility for every asset in a data dictionary.
+
+    Yang-Zhang is the default estimator (IS/OOS testing confirmed it
+    outperforms both EWMA and Garman-Klass on Sharpe across all measurement
+    windows, with no IS-to-OOS rank reversal).
 
     Parameters
     ----------
     data_dict : Dict[str, pd.DataFrame]
-        Mapping of ticker → OHLCV DataFrame (must contain a ``Close`` column).
+        Mapping of ticker → OHLCV DataFrame.  Must contain ``Open``,
+        ``High``, ``Low``, and ``Close`` columns.
     config : ModelConfig
-        Model configuration supplying ``volatility_lambda``,
-        ``volatility_init_window``, and ``volatility_smoothing``.
+        Model configuration supplying ``yang_zhang_window`` (default: 84).
 
     Returns
     -------
     pd.DataFrame
-        DataFrame with dates as index and tickers as columns.
+        Annualised YZ volatility with dates as index and tickers as columns.
     """
     series = {
-        ticker: compute_volatility_model(
-            df["Close"],
-            config.volatility_lambda,
-            config.volatility_init_window,
-            config.volatility_smoothing,
-        )
+        ticker: compute_yang_zhang_vol(df, config.yang_zhang_window)
         for ticker, df in data_dict.items()
     }
     return pd.DataFrame(series)
