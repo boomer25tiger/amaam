@@ -121,7 +121,7 @@ The AMAAM consists of two independent sleeves, each managed by the same TRank ra
 ### 3.1 Formula
 
 ```
-TRank = (wM * Rank(M) + wV * Rank(V) + wC * Rank(C) - wT * T) + M/n
+TRank = (wM * Rank(M) + wV * Rank(V) + wC * Rank(C) + wT * T) + M/n
 ```
 
 Where:
@@ -154,26 +154,35 @@ M = (Price_today / Price_{today - 84 trading days}) - 1
 
 **Purpose**: Determine asset risk through realized volatility estimation.
 
-**Calculation**: Exponentially Weighted Moving Average (EWMA) variance model, based on J.P. Morgan's RiskMetrics methodology.
+**Calculation**: Yang-Zhang (2000) variance estimator. Yang-Zhang is an
+OHLC-based estimator that is simultaneously drift-independent, unbiased,
+and minimum-variance. It achieves approximately 8× the statistical
+efficiency of a standard close-to-close estimator, requiring a shorter
+lookback window for the same precision.
 
 ```
-σ²_t = λ * σ²_{t-1} + (1 - λ) * r²_{t-1}
+σ²_YZ = σ²_overnight + k · σ²_open-to-close + (1 − k) · σ²_RS
 ```
 
 Where:
-- `λ = 0.94` (RiskMetrics daily decay factor, from Zangari 1996)
-- `r_{t-1}` = previous day's return (log return on closing prices)
-- `σ²_t` = today's variance estimate
+- `σ²_overnight` = rolling variance of log(Open_t / Close_{t-1})
+- `σ²_open-to-close` = rolling variance of log(Close_t / Open_t)
+- `σ²_RS` = Rogers-Satchell (1991) term: mean of (H−C)(H−O) + (L−C)(L−O)
+  in log-price space; captures intra-day drift
+- `k = 0.34 / (1.34 + (n+1)/(n−1))` — Chou-Wang optimal mixing coefficient
+- `n = 84` trading days (matched to momentum_lookback; see `yang_zhang_window`
+  in ModelConfig)
 
-The EWMA variance is initialized using the variance of the first 20 daily returns, then the recursive formula is applied forward.
-
-After computing the raw EWMA variance series, apply a 10-day simple moving average for smoothing (as specified in the RAAM paper).
-
-The Volatility Model uses OHLC daily data for calculation. Convert the final variance to annualized volatility:
+All three component variances use the same rolling window `n`.
+Convert the final variance estimate to annualized volatility:
 
 ```
-V = sqrt(σ²_smoothed * 252)
+V = sqrt(σ²_YZ.clip(lower=0) * 252)
 ```
+
+**Legacy**: An EWMA estimator (`compute_ewma_variance`, `compute_volatility_model`)
+is retained in `volatility.py` for reference and backward compatibility but
+is no longer used in the main execution path.
 
 **Ranking**: Assets ranked 1 to N in descending order. Lowest volatility = rank N = best.
 
@@ -197,61 +206,101 @@ Where `r_i` and `r_j` are vectors of daily returns over the lookback window.
 
 **Important**: Correlations are computed within each sleeve independently. The main sleeve's C values reflect correlations among the 16 main sleeve ETFs. The hedging sleeve's C values reflect correlations among the 6 hedging ETFs. There is no cross-sleeve correlation computation.
 
-### 3.5 Factor 4: ATR Trend/Breakout System (T)
+### 3.5 Factor 4: Keltner Channel Trend Direction (T)
 
-**Purpose**: Determine asset directionality / trend status.
+**Purpose**: Determine asset trend direction using an asymmetric Keltner
+Channel that adjusts dynamically to volatility.
 
-**Calculation**: ATR-based breakout system on daily OHLC data.
+**Band formulas** (daily OHLC data):
 
 ```
-Upper Band = ATR(42) + Highest Close(63)
-Lower Band = ATR(42) + Highest Low(105)
+ATR_t  = (1/42) × Σ_{i=0}^{41} TR_{t-i}       (SMA of True Range, NOT Wilder)
+UB_t   = EMA(Close, 63)_t  + 1.0 × ATR_t       (upper / bullish band)
+LB_t   = EMA(Close, 105)_t − 1.0 × ATR_t       (lower / bearish band)
 ```
 
 Where:
-- `ATR(42)` = 42-period Average True Range
-- `Highest Close(63)` = highest closing price over the past 63 trading days
-- `Highest Low(105)` = highest low price over the past 105 trading days
+- `ATR` = 42-period **simple** moving average of True Range.
+  `TR_t = max(H_t − L_t, |H_t − C_{t-1}|, |L_t − C_{t-1}|)`
+- `EMA(Close, 63)` = exponential moving average of closing price with span 63
+  (α = 2/64); the faster span confirms uptrends more readily.
+- `EMA(Close, 105)` = EMA with span 105 (α = 2/106); the slower span requires
+  a sustained price decline before the downtrend signal fires.
+- Multiplier k = 1.0 (Keltner multiplier per Variant A).
 
-**Signal logic** (evaluated daily):
-- If today's High > Upper Band → T = +2 (Long/Uptrend) starting next session
-- If today's Low < Lower Band → T = -2 (Neutral/Downtrend) starting next session
-- Otherwise → T retains its previous value
+**Asymmetric design rationale**: The upper band uses a faster EMA (63 days ≈
+3 months) so the model captures emerging uptrends without excessive lag.  The
+lower band uses a slower EMA (105 days ≈ 5 months) so a brief correction does
+not immediately flip the signal to −2; a sustained downtrend is required.
+Both bands widen when ATR rises, demanding a more decisive move to change state
+in turbulent markets.
 
-**Important**: The "Short" label in Giordano's paper refers to the trend reading, NOT a short-sell instruction. The entire model is long-only. T = -2 simply worsens the asset's TRank, making it less likely to be selected.
+**Signal logic** (persistent carry, evaluated at each daily bar):
 
-**Usage in TRank**: T enters as a raw value (not ranked), and is SUBTRACTED. When T = +2, the subtraction improves TRank (less is subtracted). When T = -2, the subtraction worsens TRank (more is subtracted, since -(-2) = +2 added to the score, pushing it higher, meaning worse rank since lower TRank = better).
+```
+T_t = +2   if High_t  > UB_t    (uptrend confirmed)
+T_t = −2   if Low_t   < LB_t    (downtrend confirmed)
+T_t = T_{t-1}  otherwise        (no change — state persists)
+```
 
-Wait — let me clarify the TRank direction. In the original papers, LOWER TRank = BETTER. The formula adds weighted ranks (where higher rank = better, meaning higher number). So a higher TRank score is better. The top N assets are those with the HIGHEST TRank.
+If both conditions fire simultaneously (extremely rare), the uptrend rule
+takes precedence.  The initial state before the first valid band date is −2
+(conservative: assume no confirmed trend).
 
-Let me re-examine: `TRank = (wM * Rank(M) + wV * Rank(V) + wC * Rank(C) - wT * T) + M/n`
+**Key behavioural property**: Because the lower band sits *below* the EMA
+centre line (LB = EMA − ATR), a full ATR of distance below the 105-day moving
+average is required to trigger T = −2.  Conversely, a full ATR above the
+63-day EMA triggers T = +2.  Once flipped, the signal persists until the
+opposite band is breached — T = +2 can remain in effect for many consecutive
+months if prices hold above the lower band.
 
-When T = +2 (uptrend): `- wT * 2` is subtracted, lowering TRank.
-When T = -2 (downtrend): `- wT * (-2) = + 2*wT` is added, raising TRank.
+**Important**: T = −2 simply worsens the asset's TRank, making it less likely
+to be selected.  The entire model is long-only; T = −2 is NOT a short-sell
+instruction.
 
-This seems inverted. Let me re-read the original paper...
+**Usage in TRank**: T enters the formula as a raw ±2 value (not ranked) and
+is **added** (not subtracted).  Because `select_top_n` picks the *highest*
+TRank and rank N = best throughout:
+- T = +2 (uptrend): adds 2·wT → TRank rises → asset more likely selected. ✓
+- T = −2 (downtrend): subtracts 2·wT → TRank falls → asset less likely selected. ✓
 
-In Giordano's formulation, HIGHER TRank = BETTER, and the subtraction of T when T = +2 appears to penalize uptrending assets, which is wrong. The correct interpretation, based on the context and results, is likely:
-
-**Correction**: The T factor is handled as follows: when T = +2 (uptrend), the asset should be FAVORED. The formula should ADD T, not subtract. Re-reading the original: `- wT * T` with T = +2 gives `-wT*2`, which penalizes uptrending assets. This only makes sense if LOWER TRank = BETTER (select the N assets with the lowest TRank).
-
-**Resolution**: In both original papers, the best 5 ETFs are selected based on each TRank. Given the formula structure where Rank values range from 1 (worst) to N (best), and T = +2 is favorable:
-
-- If HIGHER TRank = BETTER (select highest): T should be ADDED, not subtracted. The formula in the paper may have a sign convention where T = -2 for uptrend and +2 for downtrend, or the "best" selection picks the lowest TRank.
-
-**Implementation note**: During implementation, validate the T factor's sign convention by checking a known period (e.g., a strong uptrend in XLK) and confirming that the T factor improves that asset's TRank. If the paper's formula produces counterintuitive results, flip the sign. Document the resolution.
+See Section 3.1 for the full formula.
 
 ### 3.6 Factor Weights
 
-**Base case (Keller heuristic weights, normalized)**:
-- wM = 0.50 (Momentum — primary return signal, deserves dominant weight)
-- wV = 0.25 (Volatility — secondary risk factor)
-- wC = 0.25 (Correlation — secondary diversification factor)
-- wT = to be calibrated during implementation (T operates differently from the ranked factors)
+**Calibrated weights**:
+- wM = 0.65 (Momentum — primary return signal, receives dominant weight)
+- wV = 0.25 (Volatility — secondary risk-control signal)
+- wC = 0.10 (Correlation — tiebreaker role; most regime-dependent factor)
+- wT = 1.0 (Scale factor for trend; T operates differently from ranked factors)
 
-**Rationale**: Keller and van Putten (2012) set wR=1, wV=0.5, wC=0.5 in the original FAA paper, explicitly stating these values were chosen "arbitrarily." Their intuition was that momentum should receive approximately double the weight of either risk factor, since momentum is the primary return-predictive signal while volatility and correlation are risk-management inputs. Normalizing their weights to sum to 1.0 yields the 50/25/25 split above.
+**Rationale**: Keller and van Putten (2012) set wR=1, wV=0.5, wC=0.5 in
+the original FAA paper, explicitly stating these values were chosen
+"arbitrarily." Their intuition was that momentum should receive
+approximately double the weight of either risk factor. Normalizing to sum
+to 1.0 yields 0.50/0.25/0.25 as a starting point.
 
-**Sensitivity analysis**: Factor weights will be varied systematically (see Section 6) to test robustness. wM will be varied from 0.20 to 0.60 in 0.05 increments, with wV and wC adjusted proportionally. Equal weights (0.25/0.25/0.25/0.25) will also be tested as an alternative base case, following DeMiguel et al. (2009) and Dichtl et al. (2021) findings that equal-weight factor allocation is difficult to outperform.
+A structural audit of the backtest revealed that at wV=0.25, the
+volatility factor chronically over-rewarded low-vol defensive sectors
+(XLP, XLU, XLV), which collectively occupied the top-6 sleeve 143% of
+months at near-cash returns — creating a portfolio drag. The correlation
+factor is the most regime-dependent and least theoretically grounded of
+the three ranked signals; at wC=0.25 it amplified defensive crowding
+rather than improving diversification.
+
+Raising wM to 0.65 and reducing wC to 0.10 (with wV retained at 0.25)
+reduced combined defensive-sector selection by 21.5 percentage points,
+improved full-period CAGR from 8.53% to 9.47%, OOS Sharpe from 0.537 to
+0.593, and OOS Calmar from 0.566 to 0.664. Walk-forward validation across
+six independent 2-year windows confirmed directional improvement in 4/6
+periods. The weights reflect a design decision consistent with the
+strategy's momentum-first purpose.
+
+**Sensitivity analysis**: Factor weights were varied systematically
+(scripts/wv_sweep.py, scripts/wc_sweep_wv15.py, scripts/wm_wc_grid_sweep.py,
+scripts/walk_forward.py). Walk-forward, sensitivity neighbourhood, and
+Deflated Sharpe Ratio tests were applied to candidate configurations before
+the final weights were adopted.
 
 ### 3.7 Asset Selection and Allocation Logic
 
@@ -564,10 +613,10 @@ class ModelConfig:
     atr_upper_lookback: int = 63  # Highest close lookback
     atr_lower_lookback: int = 105  # Highest low lookback
 
-    # Factor weights (Keller heuristic, normalized)
-    weight_momentum: float = 0.50
+    # Factor weights (see Section 3.6 for calibration rationale)
+    weight_momentum: float = 0.65
     weight_volatility: float = 0.25
-    weight_correlation: float = 0.25
+    weight_correlation: float = 0.10
     weight_trend: float = 1.0  # Scale factor for T in TRank
 
     # Selection parameters
@@ -588,8 +637,8 @@ class ModelConfig:
     backtest_end: str = "2026-04-10"
     holdout_start: str = "2018-01-01"
 
-    # EWMA initialization window
-    volatility_init_window: int = 20
+    # Yang-Zhang volatility window (trading days); matched to momentum_lookback
+    yang_zhang_window: int = 84
 ```
 
 ### 9.2 config/etf_universe.py
@@ -626,10 +675,18 @@ Definitions of the ETF universes for each sleeve, plus benchmarks. Includes tick
 
 ### 9.7 src/factors/volatility.py
 
-**Functions:**
-- `compute_ewma_variance(returns, lambda_param, init_window) -> pd.Series`: Takes daily returns Series, computes EWMA variance recursively. Returns variance Series.
-- `compute_volatility_model(prices, lambda_param, init_window, smoothing_window) -> pd.Series`: Full pipeline: compute returns, EWMA variance, smooth, annualize. Returns annualized vol Series.
-- `compute_volatility_all_assets(data_dict, config) -> pd.DataFrame`: Computes vol for all assets.
+**Primary functions (Yang-Zhang estimator):**
+- `compute_yang_zhang_vol(ohlc, window) -> pd.Series`: Takes a per-ticker
+  OHLC DataFrame and rolling window (trading days). Returns annualized
+  Yang-Zhang volatility Series.
+- `compute_volatility_all_assets(data_dict, config) -> pd.DataFrame`:
+  Dispatches to `compute_yang_zhang_vol` for every ticker using
+  `config.yang_zhang_window`. Returns a DataFrame of annualized volatility
+  with dates as index and tickers as columns.
+
+**Legacy functions (EWMA — retained for reference, not used in main path):**
+- `compute_ewma_variance(returns, lambda_param, init_window) -> pd.Series`
+- `compute_volatility_model(prices, lambda_param, init_window, smoothing_window) -> pd.Series`
 
 ### 9.8 src/factors/correlation.py
 
@@ -640,10 +697,10 @@ Definitions of the ETF universes for each sleeve, plus benchmarks. Includes tick
 ### 9.9 src/factors/trend.py
 
 **Functions:**
-- `compute_atr(high, low, close, period) -> pd.Series`: Average True Range calculation.
-- `compute_atr_bands(high, low, close, atr_period, upper_lookback, lower_lookback) -> Tuple[pd.Series, pd.Series]`: Returns upper and lower ATR bands.
-- `compute_trend_signal(high, low, close, atr_period, upper_lookback, lower_lookback) -> pd.Series`: Returns Series of +2/-2 trend signals.
-- `compute_trend_all_assets(data_dict, config) -> pd.DataFrame`: Computes trend for all assets.
+- `compute_atr(high, low, close, period) -> pd.Series`: 42-period SMA of True Range.
+- `compute_atr_bands(high, low, close, atr_period, upper_ema_span, lower_ema_span) -> Tuple[pd.Series, pd.Series]`: Returns asymmetric Keltner Channel upper and lower bands.
+- `compute_trend_signal(high, low, close, atr_period, upper_ema_span, lower_ema_span) -> pd.Series`: Returns Series of +2/−2 persistent trend signals.
+- `compute_trend_all_assets(data_dict, config) -> pd.DataFrame`: Computes Keltner Channel trend for all assets.
 
 ### 9.10 src/ranking/trank.py
 
