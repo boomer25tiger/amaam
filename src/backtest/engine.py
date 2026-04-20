@@ -81,6 +81,16 @@ def _month_end_dates(index: pd.DatetimeIndex) -> List[pd.Timestamp]:
     ]
 
 
+def _biweekly_signal_dates(index: pd.DatetimeIndex) -> List[pd.Timestamp]:
+    """Return every 10th trading day within *index* (≈ bi-weekly, ~25 events/year).
+
+    A step of 10 trading days approximates two calendar weeks and yields roughly
+    25 rebalancing events per year, versus 12 for monthly frequency.
+    """
+    all_days = sorted(index.unique().tolist())
+    return all_days[::10]  # step of 10 trading days
+
+
 def _build_exec_date_map(
     signal_dates: List[pd.Timestamp],
     all_dates: List[pd.Timestamp],
@@ -262,14 +272,21 @@ def run_backtest(
     # Precompute all factor series once.
     factors = _precompute_factors(data_dict, main_tickers, hedge_tickers, config)
 
-    # Signal dates: last trading day of each month within the configured window.
+    # Signal dates: determined by rebalancing frequency from config.
+    # Biweekly uses every 10th trading day (~25/year); all other values default
+    # to month-end (12/year).  Frequency is kept in config so sweeps can override
+    # it without touching engine logic.
     window = closes.loc[config.backtest_start:config.backtest_end]
-    signal_dates = _month_end_dates(window.index)
+    if config.rebalancing_frequency == "biweekly":
+        signal_dates = _biweekly_signal_dates(window.index)
+    else:
+        signal_dates = _month_end_dates(window.index)
     exec_date_map = _build_exec_date_map(signal_dates, all_dates)
 
     logger.info(
-        "Backtest: %s → %s  (%d signal dates)",
+        "Backtest: %s → %s  (%d signal dates, %s)",
         config.backtest_start, config.backtest_end, len(signal_dates),
+        config.rebalancing_frequency,
     )
 
     # ── Main event loop ──────────────────────────────────────────────────────
@@ -336,10 +353,21 @@ def run_backtest(
 
     alloc_df = pd.DataFrame(alloc_records).set_index("date") if alloc_records else pd.DataFrame()
 
+    # Derive the actual annualisation factor from the realised return series so
+    # that biweekly (~25/year) and any future frequency produce correct Sharpe
+    # and vol figures rather than being forced through the monthly (12/year) path.
+    n_ret = len(monthly_returns)
+    if n_ret > 1:
+        span_days = (monthly_returns.index.max() - monthly_returns.index.min()).days
+        periods_per_year: float = n_ret / (span_days / 365.25) if span_days > 0 else 12.0
+    else:
+        periods_per_year = 12.0
+
     metrics = compute_all_metrics(
         monthly_returns,
         risk_free_rate=0.02,
         turnover=turnover_series,
+        periods_per_year=periods_per_year,
     )
 
     logger.info(
