@@ -66,7 +66,7 @@ def compute_trank(
 
     Formula (Section 3.1)::
 
-        TRank = (wM·Rank(M) + wV·Rank(V) + wC·Rank(C) − wT·T) + M/n
+        TRank = (wM·Rank(M) + wV·Rank(V) + wC·Rank(C) + wT·T) + M/n
 
     Where:
 
@@ -114,7 +114,7 @@ def compute_trank(
         config.weight_momentum    * momentum_ranks
         + config.weight_volatility  * volatility_ranks
         + config.weight_correlation * correlation_ranks
-        - config.weight_trend       * trend_values
+        + config.weight_trend       * trend_values
         + raw_momentum / n
     )
     trank.name = "TRank"
@@ -205,13 +205,14 @@ def compute_monthly_rankings(
         where ``N = top_n`` from config and the ``trank_`` columns hold the
         raw TRank scores for diagnostics.
     """
-    # Determine target selection count from sleeve size.
+    # Infer selection count from sleeve size: main sleeve is larger and
+    # selects more assets; hedging sleeve is smaller and selects fewer.
+    # A sleeve with more tickers than main_sleeve_top_n uses main_sleeve_top_n;
+    # a smaller sleeve (hedging) uses hedging_sleeve_top_n.
     n_sleeve = len(sleeve_tickers)
-    if n_sleeve == len(config.main_sleeve_top_n.__class__.__mro__):  # type guard
-        top_n = config.main_sleeve_top_n
     top_n = (
         config.main_sleeve_top_n
-        if n_sleeve > config.hedging_sleeve_top_n
+        if n_sleeve >= config.main_sleeve_top_n
         else config.hedging_sleeve_top_n
     )
 
