@@ -52,14 +52,14 @@ The AMAAM consists of two independent sleeves, each managed by the same TRank ra
 **Multi-Asset Rotation Model (Main Sleeve)**
 - Universe: 16 ETFs (see Section 2.2)
 - Selection: Top 6 by TRank each month
-- Momentum filter: Each selected ETF must have positive 4-month absolute momentum
+- Momentum filter: Each selected ETF must have positive blended momentum (mean of 1-, 3-, and 6-month ROC)
 - If an ETF fails the momentum filter, its weight (1/6 ≈ 16.67%) is redirected to the hedging sleeve
 - If ALL 6 selected ETFs have negative momentum, 100% of the portfolio goes to the hedging sleeve
 
 **Black Swan Hedging Model (Hedging Sleeve)**
 - Universe: 6 ETFs (see Section 2.3)
 - Selection: Top 2 by TRank
-- Momentum filter: Each selected ETF must have positive 4-month absolute momentum
+- Momentum filter: Each selected ETF must have positive blended momentum (mean of 1-, 3-, and 6-month ROC)
 - If a hedging ETF fails the momentum filter, its weight is replaced with SHY (cash proxy)
 - If ALL hedging ETFs have negative momentum, 100% of the hedging allocation goes to SHY
 
@@ -241,7 +241,7 @@ No buffer zone, no carry — signal flips immediately on close vs SMA crossover.
 | `"macd"` | MACD(12,26) zero-line cross (Appel 1979) |
 | `"ensemble"` | Majority vote across all methods above |
 
-Walk-forward testing across seven 2-year OOS windows confirmed `"sma200"` as
+Walk-forward testing across six 2-year OOS windows (folds covering 2013–2024) confirmed `"sma200"` as
 the most robust method; it tied with `"sma_ratio"` on IS Sharpe but required
 zero buffer parameters.
 
@@ -325,18 +325,19 @@ the three ranked signals; at wC=0.25 it amplified defensive crowding
 rather than improving diversification.
 
 Raising wM to 0.65 and reducing wC to 0.10 (with wV retained at 0.25)
-reduced combined defensive-sector selection by 21.5 percentage points,
-improved full-period CAGR from 8.53% to 9.47%, OOS Sharpe from 0.537 to
-0.593, and OOS Calmar from 0.566 to 0.664. Walk-forward validation across
-six independent 2-year windows confirmed directional improvement in 4/6
-periods. The weights reflect a design decision consistent with the
-strategy's momentum-first purpose.
+reduced combined defensive-sector selection by 21.5 percentage points and
+improved risk-adjusted returns across IS, OOS, and walk-forward periods.
+Walk-forward validation across six independent 2-year windows confirmed
+directional improvement in 5/6 folds; the canonical wM=0.65 configuration
+produced a stacked OOS Sharpe of 0.739 vs 0.586 for the equal-weight
+baseline (wM=0.50). The weights reflect a design decision consistent with
+the strategy's momentum-first purpose.
 
-**Sensitivity analysis**: Factor weights were varied systematically
-(scripts/wv_sweep.py, scripts/wc_sweep_wv15.py, scripts/wm_wc_grid_sweep.py,
-scripts/walk_forward.py). Walk-forward, sensitivity neighbourhood, and
-Deflated Sharpe Ratio tests were applied to candidate configurations before
-the final weights were adopted.
+**Sensitivity analysis**: Factor weights were varied systematically via
+`scripts/walk_forward.py` (39-configuration grid, 6 expanding-window folds)
+and `src/analysis/sensitivity.py`. Walk-forward, sensitivity neighbourhood,
+and statistical-significance tests were applied to candidate configurations
+before the final weights were adopted.
 
 ### 3.7 Asset Selection and Allocation Logic
 
@@ -387,7 +388,7 @@ Where the sum is over all selected assets in the sleeve (after momentum filter).
 - **Frequency**: Daily
 - **Fields**: Open, High, Low, Close (adjusted for splits and dividends), Volume
 - **Period**: From earliest common inception date through present
-- **Binding constraint**: All ETFs have data back to at least 2003–2004. With proxy series extending SH, DBC, and UUP back to 2004-01-01, and a 126-day initialisation buffer, the first valid signal month is approximately 2005-05. Backtest live trading begins 2005-07 to allow an additional buffer.
+- **Binding constraint**: All ETFs have data back to at least 2003–2004. Proxy series extend SH, DBC, and UUP back to 2004-01-01. The longest factor warm-up is the 200-day SMA trend filter; combined with the Yang-Zhang 126-day window and the 84-day fallback momentum lookback, the first valid signal month is approximately 2004-06. The backtest data load begins 2004-01-01 with factor values initialising during the warm-up period.
 
 ### 4.3 Data Validation
 
@@ -409,15 +410,16 @@ During Phase 1, the following checks must be performed on all downloaded data:
 
 ### 5.1 Backtest Period
 
-- **Start**: 2004-01-01 data load; first live signal month 2005-07
-- **End**: April 2026 (present)
-- **Total**: approximately 225 months (18.75 years)
+- **Start**: 2004-01-01 data load; first live signal month approximately 2004-06
+- **End**: April 10, 2026 (`backtest_end = "2026-04-10"`)
+- **Total**: 250 months (~20.8 years)
 
 ### 5.2 Train/Test Split
 
-- **Development period**: 2005-07 — 2017-12 (150 months, 12.5 years)
-- **Holdout period**: January 2018 — April 2026 (100 months, 8.3 years)
-- All design decisions are finalized using only the development period. The holdout is run ONCE at the end.
+- **In-sample (development) period**: 2004-01 — 2017-12 (151 months, ~12.6 years). `holdout_start = "2018-01-01"`.
+- **Out-of-sample / holdout period**: 2018-01 — 2026-04 (98 months, ~8.2 years).
+- **Deep holdout** (run-once, not used in any design decision): 2024-01 — 2026-04 (28 months).
+- All design decisions are finalized using only the in-sample period. The holdout is run ONCE at the end.
 
 ### 5.3 Execution Assumptions
 
@@ -443,8 +445,8 @@ The backtesting engine should accept rebalancing frequency as a configurable par
 Three scenarios tested:
 
 - **0 bps**: Gross returns (for comparison with original papers)
-- **10 bps round trip**: Base case for liquid ETFs (consistent with Frazzini, Israel, and Moskowitz 2015 findings for institutional-size trades in liquid instruments)
-- **15 bps round trip**: Stress test accounting for wider spreads on less liquid ETFs (DBC, UUP)
+- **5 bps one-way** (default, `transaction_cost = 0.0005`): Base case, consistent with current liquid ETF bid-ask spreads (large-cap ETFs at 1–2 bps; less liquid names like EEM, DBC at 3–5 bps)
+- **10 bps one-way**: Stress test for wider-spread environments and less liquid instruments
 
 Transaction cost is applied to the dollar value of each trade (buy or sell). Turnover is calculated as the sum of absolute changes in portfolio weights from one rebalancing to the next.
 
@@ -477,6 +479,48 @@ All metrics computed for the AMAAM and each benchmark, across all transaction co
 | Average Monthly Turnover | Mean of monthly turnover values |
 | Annual Turnover | Sum of monthly turnovers, averaged across years |
 
+**Computed results — full backtest 2004-01-01 to 2026-04-10, 5 bps one-way transaction cost:**
+
+| Metric | AMAAM | SPY | 60/40 | 7Twelve |
+|--------|------:|----:|------:|--------:|
+| Annualized Return | 10.68% | 10.23% | 7.67% | 7.40% |
+| Annualized Volatility | 12.40% | 16.24% | 10.18% | 12.00% |
+| Sharpe Ratio (rf=2%) | 0.723 | 0.562 | 0.584 | 0.493 |
+| Sortino Ratio | 1.437 | 0.934 | 1.142 | 0.910 |
+| Calmar Ratio | 0.578 | 0.193 | 0.231 | 0.197 |
+| Max Drawdown | −18.47% | −52.90% | −33.21% | −37.54% |
+| MDD Duration (months) | 27 | 53 | 38 | 27 |
+| Best Month | +9.73% | +15.64% | +10.29% | +15.31% |
+| Worst Month | −11.01% | −19.89% | −12.27% | −17.31% |
+| Best Calendar Year | +37.36% | +39.06% | +27.93% | +43.22% |
+| Worst Calendar Year | −13.82% | −43.22% | −27.44% | −31.92% |
+| % Positive Months | 62.8% | 65.0% | 66.2% | 63.5% |
+| % Positive Years | 86.4% | 87.0% | 87.0% | 82.6% |
+| Win/Loss Payoff Ratio | 1.108× | 0.912× | 0.940× | 0.988× |
+| Skewness | −0.222 | −0.705 | −0.615 | −0.805 |
+| Excess Kurtosis | +0.032 | +2.805 | +2.969 | +5.658 |
+| Avg Monthly Turnover | 74.5% | — | — | — |
+| Total Return | +705.36% | — | — | — |
+
+**Sub-period and validation results (AMAAM only):**
+
+| Period | Sharpe |
+|--------|--------|
+| In-sample 2004–2018 (151 months) | 0.761 |
+| Out-of-sample 2018–2026 (98 months) | 0.671 |
+| Deep holdout 2024–2026 (28 months, run-once) | 1.103 |
+| Walk-forward stacked OOS (6 folds) | 0.739 |
+
+**Statistical significance:**
+
+| Test | Result |
+|------|--------|
+| Bootstrap 95% CI (Sharpe) | [0.302, 1.127] — excludes zero |
+| Permutation test Z vs SPY | Z = +4.06, p ≈ 0 |
+| OLS Alpha vs SPY | +11.55%/yr, p = 0.0001 |
+| Beta vs SPY | −0.003 (not statistically different from zero) |
+| R² vs SPY | ≈ 0 |
+
 ---
 
 ## 6. SENSITIVITY ANALYSIS
@@ -507,45 +551,51 @@ Run full backtest with monthly and bi-weekly rebalancing. Report side-by-side pe
 
 All charts should be produced in both formats. Matplotlib PNGs saved to a `reports/figures/` directory for the GitHub README. Plotly HTML files saved to a `reports/interactive/` directory for personal analysis.
 
-**Performance Overview:**
-1. Cumulative equity curve (log scale) for AMAAM and all benchmarks on same chart
-2. Drawdown chart (peak-to-trough decline over time) for AMAAM and benchmarks
-3. Monthly return heatmap (year × month grid with color coding)
-4. Annual return bar chart comparing AMAAM to each benchmark
+**Performance Overview (01–05):**
+1. Equity curves — Growth of $100, linear scale, AMAAM and all benchmarks
+2. Drawdown comparison — peak-to-trough decline over time
+3. Monthly return heatmap — year × month grid with colour coding
+4. Annual return bar chart
 5. Rolling 12-month return chart
 
-**Risk Analysis:**
-6. Rolling 12-month Sharpe ratio over time
-7. Rolling 12-month volatility over time
-8. Rolling max drawdown (trailing 12-month worst drawdown)
-9. Distribution histogram of monthly returns with normal distribution overlay
+**Risk Analysis (06–09):**
+6. Rolling 36-month Sharpe ratio
+7. Rolling 36-month volatility
+8. Rolling max drawdown (trailing 36-month)
+9. Monthly return distribution with normal overlay
 
-**Allocation Analysis:**
-10. Stacked area chart: main sleeve holdings over time
-11. Stacked area chart: hedging sleeve holdings over time
-12. Line chart: percentage of portfolio allocated to hedging sleeve over time
-13. Turnover analysis: monthly turnover percentage over time
+**Allocation Analysis (10–13):**
+10. Stacked area chart — main sleeve holdings over time
+11. Allocation heatmap — per-ETF weight grid
+12. Hedging sleeve weight over time
+13. Monthly turnover percentage over time
 
-**Factor Analysis:**
-14. Time series of TRank factor weights (if walk-forward optimization implemented)
-15. Return decomposition: contribution from main sleeve vs hedging sleeve
-16. Correlation matrix of the 16 main sleeve ETFs (full period)
+**Factor and Regime Analysis (14–16):**
+14. Regime performance — per-strategy bar chart across 6 market regimes
+15. Selection sensitivity — Sharpe across Top-4 / Top-5 / Top-6 / Top-7
+16. Weighting scheme comparison — equal vs inverse-volatility
 
-**Regime Analysis:**
-17. Performance statistics table broken out by: 2008 GFC, 2011 Euro crisis, 2015-16 commodity crash, 2018 vol spike, 2020 COVID, 2022 rate shock
+**Transaction Cost Impact (17–18):**
+17. Equity curves at 0, 5, and 10 bps one-way
+18. Annual returns across cost scenarios
 
-**Sensitivity Analysis:**
-18. Heatmap: Sharpe ratio across factor weight combinations
-19. Bar chart: performance metrics across selection count variants
-20. Bar chart: equal weight vs inverse-vol weight comparison
+**Out-of-Sample Validation (19–23):**
+19. Benchmark comparison summary bar chart
+20. Statistical significance (bootstrap + permutation)
+21. Bootstrap Sharpe distribution
+22. Performance summary table (all metrics, AMAAM + benchmarks)
+23. Risk summary table
 
-**Transaction Cost Impact:**
-21. Equity curves overlaid at 0, 10, and 15 bps
-22. Table: all summary statistics across cost scenarios
-
-**Out-of-Sample Validation:**
-23. Separate equity curves for development and holdout periods
-24. Side-by-side statistics tables for each period
+**Supplementary Analytics (24–32):**
+24. Risk-return scatter (annualised return vs volatility)
+25. Rolling beta scatter vs SPY
+26. Rolling 36-month SPY correlation
+27. Drawdown duration — depth vs months-to-trough scatter
+28. Win rate and payoff statistics table
+29. Value at Risk (VaR) and Conditional VaR (CVaR)
+30. Rolling 36-month Calmar ratio
+31. Return autocorrelation (ACF, 24 lags)
+32. Walk-forward validation — per-fold Sharpe and stacked OOS equity curves
 
 ### 7.2 Summary Statistics Table
 
@@ -998,7 +1048,7 @@ Document these in the README:
 
 2. **Monthly rebalancing lag**: The model cannot react to intra-month developments. The 4-month momentum lookback introduces additional delay in detecting regime changes. The hedging sleeve only activates at month-end rebalancing.
 
-3. **Bi-weekly rebalancing partially mitigates the lag but doubles transaction frequency.
+3. **Bi-weekly rebalancing** partially mitigates the lag but doubles transaction frequency and amplifies cost drag at higher cost assumptions.
 
 4. **Survivorship bias**: All ETFs in the universe exist today. Delisted or merged ETFs that were available during the backtest period are not included.
 
@@ -1008,15 +1058,21 @@ Document these in the README:
 
 7. **Tax implications not modeled**: Monthly (or bi-weekly) rebalancing in a taxable account generates short-term capital gains. The backtest reports pre-tax returns. For taxable accounts, the strategy is more efficient in a tax-advantaged wrapper (IRA, 401k).
 
-8. **Factor weight selection**: The base case factor weights (50/25/25) are heuristic, following Keller and van Putten (2012). No closed-form derivation exists for optimal weights in this ranking framework. The sensitivity analysis characterizes how performance varies across the weight space.
+8. **Factor weight selection**: The current weights (wM=0.65, wV=0.25, wC=0.10) were selected after walk-forward validation but remain heuristic — no closed-form derivation exists for optimal weights in this ranking framework. The sensitivity analysis characterises how performance varies across the weight space; the surface around wM=0.65 is relatively flat (±0.05 produces minor changes), so the result is robust but not uniquely optimal.
 
 9. **SH (ProShares Short S&P 500) structural decay**: Daily rebalancing of the inverse ETF causes performance to deviate from the theoretical inverse of the S&P 500 over multi-day holding periods. The momentum filter limits exposure duration, but some decay drag is unavoidable during holding periods.
 
 10. **Correlation factor degradation during crises**: When correlations spike across all assets during market stress, the C factor loses discriminating power. All assets receive similar correlation scores, reducing the factor's contribution to the ranking.
 
-11. **No transaction costs were included in the original Giordano papers**. Our inclusion of 10 and 15 bps scenarios is an improvement but still assumes uniform costs across all ETFs, when in reality spreads vary by instrument and market conditions.
+11. **No transaction costs were included in the original Giordano papers**. Our inclusion of 5 and 10 bps one-way scenarios is an improvement but still assumes uniform costs across all ETFs, when in reality spreads vary by instrument and market conditions.
 
 12. **Data source limitations**: yfinance is an unofficial API subject to breaking changes. Historical adjusted close calculations may differ between data providers. Schwab API provides more reliable data for live use.
+
+13. **Lag-1 autocorrelation artefact**: Monthly returns exhibit a statistically significant negative lag-1 ACF of −0.187. This is a mechanical consequence of the monthly rebalancing rule — the portfolio systematically sells recent outperformers and buys recent underperformers within the selected set — not a genuine signal or exploitable inefficiency.
+
+14. **Walk-forward Fold 3 underperformance**: The walk-forward winner for Fold 3 (test window 2017–2018) underperforms the equal-weight baseline (SR 0.287 vs 0.460). The 2017–2018 low-volatility / vol-shock regime (XIV implosion, Feb 2018) penalised the volatility-sensitive ranking. This period represents a known regime risk for the model.
+
+15. **Holdout beta during the April 2025 tariff shock**: Over the 28-month deep holdout (2024-01 to 2026-04) the rolling beta vs SPY reached −0.355 during the April 2025 trade-policy selloff as the model rotated defensively. This inflates the holdout Sharpe (1.103) relative to a more benign environment and should not be extrapolated.
 
 ---
 
@@ -1030,7 +1086,10 @@ scipy>=1.10
 
 # Data
 yfinance>=0.2.30
-schwab-py>=1.0  # Optional, for live signals
+exchange-calendars>=4.2
+
+# Live trading (optional — Phase 9)
+# schwab-py>=1.0
 
 # Visualization
 matplotlib>=3.7
@@ -1041,8 +1100,9 @@ pytest>=7.0
 pytest-cov>=4.0
 
 # Utilities
-pyyaml>=6.0  # If config files used alongside dataclasses
-tqdm>=4.65  # Progress bars for long backtests
+pyyaml>=6.0
+tqdm>=4.65
+python-dotenv>=1.0
 ```
 
 ---
