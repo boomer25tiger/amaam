@@ -1,13 +1,10 @@
 """
 Backtesting engine for AMAAM.
 
-Core event loop that iterates over monthly (or bi-weekly) rebalancing dates,
-computes the full factor stack and allocation for each period, applies the
-resulting weights to the following period's returns, and deducts transaction
-costs based on portfolio turnover. Returns a BacktestResult dataclass containing
-the equity curve, monthly returns, weight history, turnover series, and per-period
-factor values. Rebalancing frequency is a configurable parameter. See Sections
-5.3, 5.4, 5.5, and 9.13 of the specification.
+Runs the monthly (or bi-weekly) event loop: computes factor scores, builds
+allocations, applies weights to the next period's returns, and deducts
+transaction costs. Produces a BacktestResult with equity curve, returns,
+weights, and metrics.
 """
 
 import logging
@@ -24,12 +21,33 @@ from config.etf_universe import (
 )
 from src.backtest.metrics import compute_all_metrics
 from src.factors.correlation import (
+    compute_blended_correlation_all_assets,
     compute_correlation_all_assets,
+    compute_cross_sleeve_correlation,
+    compute_ewm_correlation_all_assets,
+    compute_market_beta,
     compute_market_correlation,
+    compute_portfolio_correlation,
+    compute_portfolio_correlation_all_assets,
+    compute_stress_blend_correlation_all_assets,
+    compute_stress_correlation_all_assets,
 )
 from src.factors.momentum import compute_absolute_momentum, compute_blended_momentum
-from src.factors.trend import compute_trend_signal
-from src.factors.volatility import compute_volatility_all_assets
+from src.factors.trend import (
+    compute_trend_signal,
+    compute_paper_atr_signal,
+    compute_sma200_signal,
+    compute_sma_ratio_signal,
+    compute_sma_carry_signal,
+    compute_dual_sma_signal,
+    compute_donchian_signal,
+    compute_tsmom_signal,
+    compute_rolling_sharpe_signal,
+    compute_r2_trend_signal,
+    compute_macd_signal,
+    compute_trend_ensemble,
+)
+from src.factors.volatility import compute_blended_yang_zhang_vol, compute_volatility_all_assets
 from src.portfolio.allocation import compute_monthly_allocation
 from src.ranking.trank import compute_trank, rank_assets, select_top_n
 
@@ -42,28 +60,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BacktestResult:
-    """
-    Container for all outputs of a completed AMAAM backtest run.
-
-    Attributes
-    ----------
-    equity_curve : pd.Series
-        Portfolio value starting at 1.0, indexed by execution date (the first
-        trading day of each holding month).
-    monthly_returns : pd.Series
-        Net monthly portfolio returns (after transaction costs), indexed by
-        execution date.
-    allocations : pd.DataFrame
-        Weight of each ticker at every signal date (index = signal dates,
-        columns = all tickers ever held).  NaN means zero weight.
-    turnover : pd.Series
-        Sum of absolute weight changes at each rebalancing, indexed by signal
-        date.
-    config : ModelConfig
-        The configuration used for this run.
-    metrics : Dict[str, float]
-        Full Section 5.6 performance table, populated after the run completes.
-    """
+    """Immutable output bundle returned by ``run_backtest``."""
     equity_curve:    pd.Series
     monthly_returns: pd.Series
     allocations:     pd.DataFrame
@@ -77,7 +74,7 @@ class BacktestResult:
 # ---------------------------------------------------------------------------
 
 def _month_end_dates(index: pd.DatetimeIndex) -> List[pd.Timestamp]:
-    """Return the last trading day of each calendar month present in *index*."""
+    """Return the last trading day of each calendar month present in *index* to serve as monthly signal dates."""
     return [
         g.index.max()
         for _, g in pd.Series(index=index, dtype=float).groupby(index.to_period("M"))
@@ -85,10 +82,12 @@ def _month_end_dates(index: pd.DatetimeIndex) -> List[pd.Timestamp]:
 
 
 def _biweekly_signal_dates(index: pd.DatetimeIndex) -> List[pd.Timestamp]:
-    """Return every 10th trading day within *index* (≈ bi-weekly, ~25 events/year).
+    """Return every 10th trading day within *index* to approximate bi-weekly rebalancing (~25 events/year).
 
-    A step of 10 trading days approximates two calendar weeks and yields roughly
-    25 rebalancing events per year, versus 12 for monthly frequency.
+    Notes
+    -----
+    A fixed step of 10 trading days is used rather than a calendar-based
+    fortnight so the count stays stable across months of different lengths.
     """
     all_days = sorted(index.unique().tolist())
     return all_days[::10]  # step of 10 trading days
@@ -98,13 +97,7 @@ def _build_exec_date_map(
     signal_dates: List[pd.Timestamp],
     all_dates: List[pd.Timestamp],
 ) -> Dict[pd.Timestamp, pd.Timestamp]:
-    """
-    For each signal date return the next calendar trading day.
-
-    The one-day implementation lag (Section 5.3): signals are computed on the
-    last trading day of month M; allocation is executed at the close of the
-    next trading day (first day of month M+1).
-    """
+    """Map each signal date to the immediately following trading day, implementing the one-day execution lag required by Section 5.3."""
     date_to_idx = {d: i for i, d in enumerate(all_dates)}
     result: Dict[pd.Timestamp, pd.Timestamp] = {}
     for sig in signal_dates:
@@ -120,16 +113,13 @@ def _precompute_factors(
     hedge_tickers: List[str],
     config: ModelConfig,
 ) -> Dict[str, pd.DataFrame]:
-    """
-    Compute all four factor series for every sleeve ticker once before the loop.
+    """Compute momentum, volatility, correlation, and trend series for all tickers once before the rebalancing loop, so the loop itself is just lookups.
 
-    Correlation is computed within each sleeve independently (Section 3.4).
-    All other factors are computed per-ticker and stored as wide DataFrames.
-
-    Returns
-    -------
-    Dict with keys ``"momentum"``, ``"volatility"``, ``"corr_main"``,
-    ``"corr_hedge"``, ``"trend"``.
+    Notes
+    -----
+    Correlation is computed independently per sleeve (Section 3.4); the method
+    and blend settings in ``config`` control which variant is used for each
+    factor.
     """
     all_tickers = main_tickers + hedge_tickers
     logger.info("Pre-computing factor series for %d tickers…", len(all_tickers))
@@ -139,7 +129,9 @@ def _precompute_factors(
     if config.momentum_blend:
         momentum = pd.DataFrame({
             t: compute_blended_momentum(
-                data_dict[t]["Close"], config.momentum_blend_lookbacks
+                data_dict[t]["Close"],
+                config.momentum_blend_lookbacks,
+                skip_days=config.momentum_skip_days,
             )
             for t in all_tickers
         })
@@ -150,27 +142,206 @@ def _precompute_factors(
         })
 
     # Yang-Zhang requires OHLC; pass the full per-ticker DataFrames.
-    volatility = compute_volatility_all_assets(
-        {t: data_dict[t] for t in all_tickers}, config
-    )
-
-    trend = pd.DataFrame({
-        t: compute_trend_signal(
-            data_dict[t]["High"], data_dict[t]["Low"], data_dict[t]["Close"],
-            config.atr_period, config.atr_upper_lookback, config.atr_lower_lookback,
+    # When vol_blend is True, average YZ across multiple window lengths to
+    # reduce sensitivity to any single horizon (same philosophy as blended momentum).
+    if config.vol_blend:
+        volatility = compute_blended_yang_zhang_vol(
+            {t: data_dict[t] for t in all_tickers},
+            config.vol_blend_lookbacks,
         )
-        for t in all_tickers
-    })
+    else:
+        volatility = compute_volatility_all_assets(
+            {t: data_dict[t] for t in all_tickers}, config
+        )
 
-    # Dispatch to the configured correlation estimator.  "market" uses rolling
-    # Pearson correlation with SPY, which discriminates better within the
-    # equity-heavy main sleeve than average pairwise correlation (Section 3.4).
-    if config.correlation_method == "market":
+    # Dispatch to the configured trend signal method.
+    _tm = config.trend_method
+    if _tm == "paper_atr":
+        trend = pd.DataFrame({
+            t: compute_paper_atr_signal(
+                data_dict[t]["High"], data_dict[t]["Low"], data_dict[t]["Close"],
+                config.atr_period, config.atr_upper_lookback, config.atr_lower_lookback,
+            )
+            for t in all_tickers
+        })
+    elif _tm == "sma200":
+        trend = pd.DataFrame({
+            t: compute_sma200_signal(data_dict[t]["Close"])
+            for t in all_tickers
+        })
+    elif _tm == "sma_ratio":
+        trend = pd.DataFrame({
+            t: compute_sma_ratio_signal(data_dict[t]["Close"])
+            for t in all_tickers
+        })
+    elif _tm == "sma_carry":
+        trend = pd.DataFrame({
+            t: compute_sma_carry_signal(data_dict[t]["Close"])
+            for t in all_tickers
+        })
+    elif _tm == "dual_sma":
+        trend = pd.DataFrame({
+            t: compute_dual_sma_signal(data_dict[t]["Close"])
+            for t in all_tickers
+        })
+    elif _tm == "donchian":
+        trend = pd.DataFrame({
+            t: compute_donchian_signal(data_dict[t]["Close"])
+            for t in all_tickers
+        })
+    elif _tm == "tsmom":
+        trend = pd.DataFrame({
+            t: compute_tsmom_signal(data_dict[t]["Close"])
+            for t in all_tickers
+        })
+    elif _tm == "rolling_sharpe":
+        trend = pd.DataFrame({
+            t: compute_rolling_sharpe_signal(data_dict[t]["Close"])
+            for t in all_tickers
+        })
+    elif _tm == "r2_trend":
+        trend = pd.DataFrame({
+            t: compute_r2_trend_signal(data_dict[t]["Close"])
+            for t in all_tickers
+        })
+    elif _tm == "macd":
+        trend = pd.DataFrame({
+            t: compute_macd_signal(data_dict[t]["Close"])
+            for t in all_tickers
+        })
+    elif _tm == "ensemble":
+        # Equal-weight composite: MACD (fast) + Keltner (medium) + SMA200 (slow).
+        # All parameters taken from spec / literature — no data-fitted values.
+        trend = pd.DataFrame({
+            t: compute_trend_ensemble(
+                data_dict[t]["High"],
+                data_dict[t]["Low"],
+                data_dict[t]["Close"],
+                config.atr_period,
+                config.atr_upper_lookback,
+                config.atr_lower_lookback,
+            )
+            for t in all_tickers
+        })
+    else:  # default: "keltner"
+        trend = pd.DataFrame({
+            t: compute_trend_signal(
+                data_dict[t]["High"], data_dict[t]["Low"], data_dict[t]["Close"],
+                config.atr_period, config.atr_upper_lookback, config.atr_lower_lookback,
+            )
+            for t in all_tickers
+        })
+
+    if config.correlation_blend:
+        corr_main = compute_blended_correlation_all_assets(
+            {t: data_dict[t] for t in main_tickers},
+            main_tickers,
+            config.correlation_blend_lookbacks,
+        )
+        corr_hedge = compute_blended_correlation_all_assets(
+            {t: data_dict[t] for t in hedge_tickers},
+            hedge_tickers,
+            config.correlation_blend_lookbacks,
+        )
+    elif config.correlation_method == "portfolio":
+        corr_main = compute_portfolio_correlation(
+            {t: data_dict[t] for t in main_tickers},
+            main_tickers,
+            config.correlation_lookback,
+        )
+        corr_hedge = compute_portfolio_correlation(
+            {t: data_dict[t] for t in hedge_tickers},
+            hedge_tickers,
+            config.correlation_lookback,
+        )
+    elif config.correlation_method == "portfolio_all":
+        corr_main = compute_portfolio_correlation_all_assets(
+            {t: data_dict[t] for t in main_tickers},
+            main_tickers,
+            config.correlation_lookback,
+        )
+        corr_hedge = compute_portfolio_correlation_all_assets(
+            {t: data_dict[t] for t in hedge_tickers},
+            hedge_tickers,
+            config.correlation_lookback,
+        )
+    elif config.correlation_method == "market":
         corr_main = compute_market_correlation(
             data_dict, main_tickers, config.correlation_lookback,
         )
         corr_hedge = compute_market_correlation(
             data_dict, hedge_tickers, config.correlation_lookback,
+        )
+    elif config.correlation_method == "beta":
+        corr_main = compute_market_beta(
+            data_dict, main_tickers, config.correlation_lookback,
+        )
+        corr_hedge = compute_market_beta(
+            data_dict, hedge_tickers, config.correlation_lookback,
+        )
+    elif config.correlation_method == "ewm":
+        corr_main = compute_ewm_correlation_all_assets(
+            {t: data_dict[t] for t in main_tickers},
+            main_tickers,
+            config.correlation_ewm_span,
+        )
+        corr_hedge = compute_ewm_correlation_all_assets(
+            {t: data_dict[t] for t in hedge_tickers},
+            hedge_tickers,
+            config.correlation_ewm_span,
+        )
+    elif config.correlation_method == "stress_vol":
+        corr_main = compute_stress_correlation_all_assets(
+            data_dict, main_tickers, config.correlation_lookback,
+            stress_method="vol",
+            vol_multiplier=config.stress_vol_multiplier,
+        )
+        corr_hedge = compute_stress_correlation_all_assets(
+            data_dict, hedge_tickers, config.correlation_lookback,
+            stress_method="vol",
+            vol_multiplier=config.stress_vol_multiplier,
+        )
+    elif config.correlation_method == "stress_drawdown":
+        corr_main = compute_stress_correlation_all_assets(
+            data_dict, main_tickers, config.correlation_lookback,
+            stress_method="drawdown",
+            vol_multiplier=config.stress_vol_multiplier,
+        )
+        corr_hedge = compute_stress_correlation_all_assets(
+            data_dict, hedge_tickers, config.correlation_lookback,
+            stress_method="drawdown",
+            vol_multiplier=config.stress_vol_multiplier,
+        )
+    elif config.correlation_method == "stress_blend":
+        corr_main = compute_stress_blend_correlation_all_assets(
+            data_dict, main_tickers, config.correlation_lookback,
+            vol_multiplier=config.stress_vol_multiplier,
+        )
+        corr_hedge = compute_stress_blend_correlation_all_assets(
+            data_dict, hedge_tickers, config.correlation_lookback,
+            vol_multiplier=config.stress_vol_multiplier,
+        )
+    elif config.correlation_method == "cross_sleeve":
+        c_within = compute_correlation_all_assets(
+            {t: data_dict[t] for t in main_tickers},
+            main_tickers,
+            config.correlation_lookback,
+        )
+        c_cross = compute_cross_sleeve_correlation(
+            data_dict,
+            main_tickers,
+            hedge_tickers,
+            config.correlation_lookback,
+        )
+        # Align indices before combining — both should share the same date range
+        # but reindex defensively to avoid silent NaN introduction from gaps.
+        c_cross = c_cross.reindex(index=c_within.index, columns=c_within.columns)
+        corr_main = c_within.add(c_cross.mul(config.cross_sleeve_lambda))
+
+        corr_hedge = compute_correlation_all_assets(
+            {t: data_dict[t] for t in hedge_tickers},
+            hedge_tickers,
+            config.correlation_lookback,
         )
     else:
         corr_main = compute_correlation_all_assets(
@@ -200,12 +371,7 @@ def _allocation_at_date(
     hedge_tickers: List[str],
     config: ModelConfig,
 ) -> Dict[str, float] | None:
-    """
-    Compute the full monthly allocation for one signal date.
-
-    Returns ``None`` if any required factor is entirely NaN on this date
-    (i.e., still within the warm-up period).
-    """
+    """Rank tickers and compute sleeve allocations for a single signal date, returning ``None`` during the warm-up period when factors are still all-NaN."""
     def _snap(df: pd.DataFrame, tickers: List[str]) -> pd.Series:
         """Last valid row at or before *signal_date* for *tickers*."""
         sub = df.loc[:signal_date, tickers]
@@ -234,13 +400,24 @@ def _allocation_at_date(
     rM = rank_assets(M_main, ascending=True)
     rV = rank_assets(V_main, ascending=False)
     rC = rank_assets(C_main, ascending=False)
-    trank_main = compute_trank(rM, rV, rC, T_main, M_main, config)
+    rT_main  = rank_assets(T_main,  ascending=True) if config.trend_rank_scale else T_main
+    rT_hedge = rank_assets(T_hedge, ascending=True) if config.trend_rank_scale else T_hedge
+    trank_main = compute_trank(rM, rV, rC, rT_main, M_main, config)
 
     # Rank and score — hedging sleeve.
     rMh = rank_assets(M_hedge, ascending=True)
     rVh = rank_assets(V_hedge, ascending=False)
     rCh = rank_assets(C_hedge, ascending=False)
-    trank_hedge = compute_trank(rMh, rVh, rCh, T_hedge, M_hedge, config)
+    trank_hedge = compute_trank(rMh, rVh, rCh, rT_hedge, M_hedge, config)
+
+    # Guard: if either TRank series is entirely NaN (can happen in the warm-up
+    # period before all factors have accumulated enough history), skip this date.
+    if trank_main.isna().all():
+        logger.debug("Skipping %s — trank_main all NaN", signal_date.date())
+        return None
+    if trank_hedge.isna().all():
+        logger.debug("Skipping %s — trank_hedge all NaN", signal_date.date())
+        return None
 
     top_main  = select_top_n(trank_main,  config.main_sleeve_top_n)
     top_hedge = select_top_n(trank_hedge, config.hedging_sleeve_top_n)
@@ -261,28 +438,13 @@ def run_backtest(
     data_dict: Dict[str, pd.DataFrame],
     config: ModelConfig,
 ) -> BacktestResult:
-    """
-    Execute the AMAAM monthly backtest over the full configured date range.
+    """Execute the full AMAAM backtest and return a populated ``BacktestResult``.
 
-    Implements the Section 5.3 execution model: signals computed at the last
-    trading day of month M are applied at the next trading day's close and
-    held for the full following month.  Transaction costs (Section 5.5) are
-    deducted from each period's gross return.
-
-    Parameters
-    ----------
-    data_dict : Dict[str, pd.DataFrame]
-        Processed OHLCV data, keyed by ticker.  Must contain at least all
-        main-sleeve and hedging-sleeve tickers that are present in
-        ``config``'s universe.
-    config : ModelConfig
-        Full model configuration.
-
-    Returns
-    -------
-    BacktestResult
-        Equity curve, monthly returns, allocations, turnover, and the
-        populated Section 5.6 metrics table.
+    Notes
+    -----
+    The annualisation factor for Sharpe and volatility is derived from the
+    realised return frequency rather than assuming 12 periods/year, so results
+    are correct for both monthly and bi-weekly runs.
     """
     main_tickers  = [t for t in MAIN_SLEEVE_TICKERS  if t in data_dict]
     hedge_tickers = [t for t in HEDGING_SLEEVE_TICKERS if t in data_dict]
@@ -336,12 +498,10 @@ def run_backtest(
         if alloc is None:
             continue   # still in warm-up
 
-        # ── Transaction costs (Section 5.5) ──────────────────────────────
         all_keys = set(alloc) | set(prev_alloc)
         turnover = sum(abs(alloc.get(t, 0.0) - prev_alloc.get(t, 0.0)) for t in all_keys)
         cost = turnover * config.transaction_cost / 2.0
 
-        # ── Holding-period return ─────────────────────────────────────────
         port_ret = 0.0
         for ticker, weight in alloc.items():
             if ticker in closes.columns:

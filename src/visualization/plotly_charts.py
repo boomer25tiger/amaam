@@ -8,6 +8,12 @@ counterparts to allow shared calling code in generate_reports.py. See Section
 9.19 of the specification.
 """
 
+# Common call signature for all chart functions:
+#   output_dir (Path)  — directory where the file is saved
+#   filename   (str)   — output filename (PNG for this module, HTML for plotly)
+#   returns    (Path)  — absolute path to the saved file
+# These parameters are not individually documented in each function's docstring.
+
 import os
 from pathlib import Path
 from typing import Dict, List, TYPE_CHECKING
@@ -79,15 +85,6 @@ def plot_equity_curves(
     ----------
     equity_curves : Dict[str, pd.Series]
         Strategy label → equity series (normalised to 1.0).
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     fig = go.Figure()
@@ -129,15 +126,6 @@ def plot_drawdowns(
     ----------
     equity_curves : Dict[str, pd.Series]
         Strategy label → equity series (normalised to 1.0).
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     fig = go.Figure()
@@ -174,15 +162,6 @@ def plot_monthly_return_heatmap(
     ----------
     monthly_returns : pd.Series
         AMAAM monthly return series.
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     pivot = monthly_returns.groupby([monthly_returns.index.year,
@@ -223,15 +202,6 @@ def plot_annual_returns(
     ----------
     returns_dict : Dict[str, pd.Series]
         Strategy label → monthly return series.
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     fig = go.Figure()
@@ -266,15 +236,6 @@ def plot_rolling_returns(
     ----------
     returns_dict : Dict[str, pd.Series]
         Strategy label → monthly return series.
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     fig = go.Figure()
@@ -308,15 +269,6 @@ def plot_rolling_sharpe(
     ----------
     returns_dict : Dict[str, pd.Series]
         Strategy label → monthly return series.
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     fig = go.Figure()
@@ -351,15 +303,6 @@ def plot_rolling_volatility(
     ----------
     returns_dict : Dict[str, pd.Series]
         Strategy label → monthly return series.
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     fig = go.Figure()
@@ -393,15 +336,6 @@ def plot_rolling_drawdown(
     ----------
     equity_curves : Dict[str, pd.Series]
         Strategy label → equity series (normalised to 1.0).
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     fig = go.Figure()
@@ -436,15 +370,6 @@ def plot_return_distribution(
     ----------
     returns_dict : Dict[str, pd.Series]
         Strategy label → monthly return series (AMAAM key required).
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     rets = returns_dict.get("AMAAM", next(iter(returns_dict.values()))).dropna()
@@ -489,15 +414,6 @@ def plot_main_sleeve_allocation(
         Weight history (index=signal dates, columns=tickers).
     main_tickers : List[str]
         Main sleeve tickers to include.
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     cols = [t for t in main_tickers if t in allocations.columns]
@@ -536,15 +452,6 @@ def plot_hedging_sleeve_allocation(
         Weight history (index=signal dates, columns=tickers).
     hedge_tickers : List[str]
         Hedging sleeve tickers to include.
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     cols = [t for t in hedge_tickers if t in allocations.columns]
@@ -583,15 +490,6 @@ def plot_hedging_weight_over_time(
         Weight history (index=signal dates, columns=tickers).
     hedge_tickers : List[str]
         Hedging sleeve tickers to sum.
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     cols = [t for t in hedge_tickers if t in allocations.columns]
@@ -627,15 +525,6 @@ def plot_turnover(
     ----------
     turnover : pd.Series
         Per-period portfolio turnover values.
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     rolling_avg = turnover.rolling(12, min_periods=1).mean()
@@ -673,15 +562,6 @@ def plot_factor_weights(
     ----------
     config : ModelConfig
         Model configuration containing factor weight fields.
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     labels = ["wM (Momentum)", "wV (Volatility)", "wC (Correlation)", "wT (Trend)"]
@@ -728,15 +608,6 @@ def plot_sleeve_return_decomposition(
         Main sleeve tickers.
     hedge_tickers : List[str]
         Hedging sleeve tickers.
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     main_cols  = [t for t in main_tickers  if t in allocations.columns]
@@ -793,15 +664,6 @@ def plot_correlation_matrix(
         Processed OHLCV data keyed by ticker.
     main_tickers : List[str]
         Main sleeve tickers to include.
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     avail = [t for t in main_tickers if t in data_dict]
@@ -839,15 +701,6 @@ def plot_regime_performance(
     ----------
     regime_df : pd.DataFrame
         Output of compute_regime_metrics() with MultiIndex (Strategy, Regime).
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     fig = go.Figure()
@@ -885,15 +738,6 @@ def plot_weight_sensitivity_heatmap(
     ----------
     weight_df : pd.DataFrame
         Output of run_weight_sensitivity(); index=label, column "Sharpe Ratio".
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     sharpe = weight_df["Sharpe Ratio"]
@@ -928,15 +772,6 @@ def plot_selection_sensitivity(
     ----------
     selection_df : pd.DataFrame
         Output of run_selection_sensitivity(); index=Top N.
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     metrics_to_show = ["Sharpe Ratio", "Calmar Ratio", "Max Drawdown"]
@@ -974,15 +809,6 @@ def plot_weighting_scheme_comparison(
     ----------
     results_dict : Dict[str, Dict[str, float]]
         {"Equal Weight": metrics_dict, "Inverse Vol": metrics_dict}
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     metrics_to_show = ["Sharpe Ratio", "Sortino Ratio", "Calmar Ratio", "Max Drawdown"]
@@ -1019,15 +845,6 @@ def plot_cost_scenarios_equity(
     ----------
     equity_curves : Dict[str, pd.Series]
         {"0 bps": ..., "10 bps": ..., "15 bps": ...} equity series.
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     palette = ["#4CAF50", COLORS["AMAAM"], COLORS["SPY B&H"]]
@@ -1063,15 +880,6 @@ def plot_cost_scenarios_table(
     ----------
     metrics_dict : Dict[str, Dict[str, float]]
         {"0 bps": metrics, "10 bps": metrics, "15 bps": metrics}
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     row_keys = [
@@ -1125,15 +933,6 @@ def plot_is_oos_equity(
         In-sample backtest result.
     oos_result : BacktestResult
         Out-of-sample backtest result.
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     fig = make_subplots(rows=1, cols=2, subplot_titles=["In-Sample", "Out-of-Sample"])
@@ -1173,15 +972,6 @@ def plot_is_oos_stats_table(
         In-sample backtest result.
     oos_result : BacktestResult
         Out-of-sample backtest result.
-    output_dir : str
-        Directory where the HTML is saved.
-    filename : str
-        Output file name.
-
-    Returns
-    -------
-    Path
-        Absolute path to the saved HTML.
     """
     out = _ensure_dir(output_dir)
     key_metrics = [

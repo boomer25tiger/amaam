@@ -110,11 +110,20 @@ def compute_trank(
     if n == 0:
         return pd.Series(dtype=float)
 
+    # When trend_rank_scale is True, convert raw ±2 T values to ordinal ranks
+    # 1..N (ascending: higher T = higher rank) so that T enters the composite on
+    # the same 1..N scale as M, V, and C.  Without this, raw ±2 values have
+    # negligible influence relative to ranked factors that span 1..15.
+    if config.trend_rank_scale:
+        t_component = rank_assets(trend_values, ascending=True)
+    else:
+        t_component = trend_values
+
     trank = (
         config.weight_momentum    * momentum_ranks
         + config.weight_volatility  * volatility_ranks
         + config.weight_correlation * correlation_ranks
-        + config.weight_trend       * trend_values
+        + config.weight_trend       * t_component
         + raw_momentum / n
     )
     trank.name = "TRank"

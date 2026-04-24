@@ -1,44 +1,17 @@
 """
-Correlation factor (C) for AMAAM.
+Cross-asset correlation scoring for AMAAM.
 
-Two estimation methods are supported via ``ModelConfig.correlation_method``:
-
-**"pairwise"** (original FAA spec):
-    Each asset's mean Pearson correlation with every other asset in the same
-    sleeve over a trailing window.  Promotes intra-sleeve diversification but
-    suffers from (a) statistical noise on short windows, (b) poor discriminating
-    power within equity-heavy sleeves where all assets share a large common
-    S&P 500 factor, and (c) correlation-to-1 collapse during market stress.
-
-**"market"** (revised, academically motivated):
-    Each asset's rolling Pearson correlation with SPY (the market proxy).
-    Lower market correlation → higher TRank score.
-
-    Academic basis:
-    * **Keller & Butler (2014) EAA** — replaced FAA pairwise correlation with
-      correlation to the equal-weight portfolio, arguing that pairwise scores
-      in equity universes primarily reflect shared market beta rather than
-      genuine sleeve-level diversification.
-    * **Sharpe (1964) CAPM** — marginal portfolio risk contribution is captured
-      by market beta, not average pairwise covariance, making the market the
-      correct reference for a diversification-oriented ranking factor.
-    * **Ang & Chen (2002)** — pairwise equity correlations spike toward 1.0
-      during downturns; market beta is comparatively more stable across regimes.
-    * **Frazzini & Pedersen (2014) BAB** — low-beta assets deliver higher
-      risk-adjusted returns across 20 markets, providing a return-predictive
-      rationale beyond pure diversification.
-
-    Practical advantage: SPY is available for the full backtest window, the
-    estimate is more stable than pairwise (one correlation vs N−1), and it
-    genuinely discriminates between defensive (XLU, XLP) and cyclical (XLK,
-    XLY) assets within the equity-dominated main sleeve.
-
-See Section 3.4 of the specification.
+Provides multiple correlation estimation methods (pairwise, portfolio,
+market-relative, EWM, stress-conditioned, cross-sleeve). Each function
+returns a per-asset correlation score for use as the C component of TRank.
+The method is selected via ModelConfig.correlation_method; see that field
+and Section 3.4 of the specification for per-method academic rationale.
 """
 
 import logging
 from typing import Dict, List
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -51,31 +24,15 @@ def compute_average_relative_correlation(
     date: pd.Timestamp,
 ) -> Dict[str, float]:
     """
-    Compute each asset's average pairwise correlation as of a single date.
+    Return each asset's average pairwise Pearson correlation as of a single date.
 
-    ``C_i = (1 / (N−1)) · Σ_{j≠i} corr(r_i, r_j)``
+    Used for one-shot evaluation at a specific date; prefer
+    ``compute_correlation_all_assets`` for full time-series construction.
 
-    where the sum ranges over all other assets in *tickers* and correlations
-    are Pearson over the trailing *lookback* trading days ending on *date*.
-
-    Parameters
-    ----------
-    returns_dict : Dict[str, pd.Series]
-        Mapping of ticker → daily return Series.
-    tickers : List[str]
-        Ordered list of tickers that form one sleeve.  Correlations are
-        computed only within this set (no cross-sleeve correlations).
-    lookback : int
-        Trailing window in trading days (spec default: 84).
-    date : pd.Timestamp
-        Evaluation date.  The correlation window is
-        ``(date − lookback + 1, date]`` inclusive.
-
-    Returns
-    -------
-    Dict[str, float]
-        Mapping of ticker → average pairwise correlation.  NaN if the
-        ticker has fewer than *lookback* prior returns.
+    Notes
+    -----
+    The self-correlation diagonal (always 1.0) is subtracted before dividing by
+    ``N − 1`` so the result is strictly the mean of the ``N*(N-1)/2`` off-diagonal pairs.
     """
     # Build returns DataFrame for the lookback window ending on date.
     window_returns = pd.DataFrame(
@@ -111,40 +68,20 @@ def compute_correlation_all_assets(
     lookback: int,
 ) -> pd.DataFrame:
     """
-    Compute average relative correlation for all assets across all dates.
+    Build the full time-series of average pairwise correlations for an entire sleeve in one vectorised pass.
 
-    Uses ``pd.DataFrame.rolling().corr()`` to build the full trailing
-    correlation matrix at every date in one vectorised pass, then derives
-    per-asset average pairwise correlations from the row sums.
-
-    ``C_i(t) = (Σ_j corr(r_i, r_j) − 1) / (N − 1)``
-
-    where the sum over j includes the self-correlation (1.0), which is then
-    subtracted.  Only assets in *tickers* enter the correlation calculation,
-    enforcing the sleeve-independence rule from Section 3.4.
-
-    Parameters
-    ----------
-    data_dict : Dict[str, pd.DataFrame]
-        Mapping of ticker → OHLCV DataFrame.
-    tickers : List[str]
-        Ordered sleeve ticker list.
-    lookback : int
-        Rolling window in trading days (spec default: 84).
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with dates as index and tickers as columns.  The first
-        ``lookback − 1`` rows are NaN (insufficient history).
+    Notes
+    -----
+    ``rolling().corr()`` returns a MultiIndex ``(date, ticker) × tickers`` DataFrame.
+    Row sums include the self-correlation diagonal (1.0), which is subtracted before
+    normalising by ``N − 1``.  ``min_count=n`` on the row sum is required so pre-warmup
+    rows return NaN rather than the spurious ``(0 − 1) / (N − 1)`` value that would
+    result from pandas' default ``skipna=True`` treating a fully-NaN row as 0.
     """
     available = [t for t in tickers if t in data_dict]
     if not available:
         return pd.DataFrame()
 
-    # Simple returns are used for Pearson correlation; the choice between log
-    # and simple returns is immaterial for correlation  because the scaling
-    # cancels out in the Pearson formula.
     returns_df = pd.DataFrame(
         {t: data_dict[t]["Close"].pct_change(fill_method=None) for t in available}
     )
@@ -171,6 +108,148 @@ def compute_correlation_all_assets(
     return result
 
 
+def compute_blended_correlation_all_assets(
+    data_dict: Dict[str, pd.DataFrame],
+    tickers: List[str],
+    lookbacks: List[int],
+) -> pd.DataFrame:
+    """
+    Average pairwise correlation across multiple lookback windows to reduce horizon sensitivity.
+
+    Notes
+    -----
+    A cell is NaN until every component window has exited warm-up — partial blends are
+    not used, matching the ``compute_trend_ensemble`` convention.
+    """
+    frames = [
+        compute_correlation_all_assets(data_dict, tickers, lb)
+        for lb in lookbacks
+    ]
+    # Stack on a new axis and take the mean — skipna=False so the blend is
+    # NaN until every component window has exited warm-up (same convention
+    # as compute_trend_ensemble).
+    stacked = np.stack([f.values for f in frames], axis=0)
+    blended_values = np.nanmean(stacked, axis=0)   # use nanmean: allow partial warm-up
+    # But actually use skipna=False equivalent: only valid when ALL windows valid
+    all_valid = np.all(~np.isnan(stacked), axis=0)
+    blended_values[~all_valid] = np.nan
+    result = pd.DataFrame(blended_values, index=frames[0].index, columns=frames[0].columns)
+    return result
+
+
+def compute_ewm_correlation_all_assets(
+    data_dict: Dict[str, pd.DataFrame],
+    tickers: List[str],
+    span: int,
+) -> pd.DataFrame:
+    """
+    Compute average pairwise correlation using exponentially weighted observations, making the estimate more responsive to recent regime shifts than a same-span rolling window.
+
+    Notes
+    -----
+    Uses the same MultiIndex ``(date, ticker) × tickers`` output as ``rolling().corr()``,
+    so the identical self-correlation subtraction and ``min_count`` pattern applies.
+    ``min_periods`` is set to ``span // 2`` so the series starts earlier than a
+    rectangular window of the same span.
+    """
+    available = [t for t in tickers if t in data_dict]
+    if not available:
+        return pd.DataFrame()
+
+    returns_df = pd.DataFrame(
+        {t: data_dict[t]["Close"].pct_change(fill_method=None) for t in available}
+    )
+
+    min_periods = max(span // 2, 2)
+
+    ewm_corr = returns_df.ewm(span=span, min_periods=min_periods).corr()
+
+    n = len(available)
+    row_sums = ewm_corr.sum(axis=1, min_count=n)
+
+    avg_corr_stacked = (row_sums - 1.0) / (n - 1)
+
+    # Unstack MultiIndex → date × ticker DataFrame.
+    result = avg_corr_stacked.unstack(level=1)
+    result = result.reindex(columns=available)
+    return result
+
+
+def compute_portfolio_correlation(
+    data_dict: Dict[str, pd.DataFrame],
+    tickers: List[str],
+    lookback: int,
+) -> pd.DataFrame:
+    """
+    Correlate each asset with the equal-weight return stream of its sleeve peers (excluding itself).
+
+    This is the Keller & Gilman (2012) interpretation: a single well-defined Pearson
+    correlation rather than an average of N−1 non-linear pairwise coefficients, which
+    would require Fisher z-transforms to be mathematically sound.
+    """
+    available = [t for t in tickers if t in data_dict]
+    if not available:
+        return pd.DataFrame()
+
+    returns_df = pd.DataFrame(
+        {t: data_dict[t]["Close"].pct_change(fill_method=None) for t in available}
+    )
+
+    result = pd.DataFrame(index=returns_df.index, columns=available, dtype=float)
+    for t in available:
+        # Equal-weight portfolio of all OTHER sleeve members for this asset.
+        peers = [c for c in available if c != t]
+        if not peers:
+            result[t] = float("nan")
+            continue
+        peer_portfolio = returns_df[peers].mean(axis=1)
+        result[t] = (
+            returns_df[t]
+            .rolling(window=lookback, min_periods=lookback)
+            .corr(peer_portfolio)
+        )
+
+    return result
+
+
+def compute_portfolio_correlation_all_assets(
+    data_dict: Dict[str, pd.DataFrame],
+    tickers: List[str],
+    lookback: int,
+) -> pd.DataFrame:
+    """
+    Correlate each asset with the equal-weight portfolio of all N sleeve members (including itself), the strict MCPV formulation.
+
+    Including the asset in its own reference portfolio (vs. peers-only in
+    ``compute_portfolio_correlation``) makes this the theoretically correct marginal
+    contribution to portfolio variance estimator for equal-weight portfolios
+    (Merton 1972, Keller & Butler 2014).
+    """
+    available = [t for t in tickers if t in data_dict]
+    if not available:
+        return pd.DataFrame()
+
+    # Build returns DataFrame aligned on a common date index.
+    closes = pd.DataFrame(
+        {t: data_dict[t]["Close"] for t in available}
+    ).ffill()
+    returns = closes.pct_change(fill_method=None)
+
+    # Equal-weight portfolio return (all N assets, including each asset itself).
+    # Using all N rather than N−1 peers makes this the strict MCPV estimator.
+    port_returns = returns.mean(axis=1)
+
+    result = pd.DataFrame(index=returns.index, columns=available, dtype=float)
+    for t in available:
+        result[t] = (
+            returns[t]
+            .rolling(window=lookback, min_periods=lookback)
+            .corr(port_returns)
+        )
+
+    return result
+
+
 def compute_market_correlation(
     data_dict: Dict[str, pd.DataFrame],
     tickers: List[str],
@@ -178,45 +257,10 @@ def compute_market_correlation(
     market_ticker: str = "SPY",
 ) -> pd.DataFrame:
     """
-    Compute each asset's rolling Pearson correlation with the market proxy (SPY).
+    Compute each asset's rolling Pearson correlation with the market proxy (SPY by default).
 
-    Lower market correlation → higher TRank score (same ranking direction as
-    pairwise correlation; assets that co-move less with SPY are preferred as
-    diversifiers).
-
-    This estimator addresses three structural weaknesses of the pairwise method
-    within equity-heavy sleeves:
-
-    1. **Discriminating power**: SPY correlation genuinely separates defensive
-       sectors (XLU, XLP, GLD: β ≈ 0.3–0.5) from cyclicals (XLK, XLY: β ≈ 1.1)
-       where pairwise correlation ranks them nearly identically (all ≈ 0.80).
-    2. **Statistical efficiency**: one correlation per asset vs N−1 pairwise
-       estimates, halving the estimation noise for a given lookback window.
-    3. **Crisis stability**: market beta is more stable across regimes than
-       pairwise correlations, which collapse toward 1.0 during selloffs and
-       lose all discriminating power (Ang & Chen 2002).
-
-    Parameters
-    ----------
-    data_dict : Dict[str, pd.DataFrame]
-        Mapping of ticker → OHLCV DataFrame.  Must include *market_ticker*.
-    tickers : List[str]
-        Sleeve tickers to compute correlation for.
-    lookback : int
-        Rolling window in trading days (spec default: 84).
-    market_ticker : str
-        Ticker used as the market proxy.  Defaults to ``"SPY"``.
-
-    Returns
-    -------
-    pd.DataFrame
-        Dates × tickers DataFrame of rolling market correlations.
-        First ``lookback − 1`` rows are NaN.  Range [−1, 1].
-
-    Raises
-    ------
-    KeyError
-        If *market_ticker* is not present in *data_dict*.
+    Assets with lower market correlation rank higher as diversifiers; ranking
+    direction is identical to the pairwise method.
     """
     if market_ticker not in data_dict:
         raise KeyError(
@@ -246,5 +290,255 @@ def compute_market_correlation(
             .rolling(window=lookback, min_periods=lookback)
             .corr(market_rets)
         )
+
+    return result
+
+
+def compute_stress_correlation_all_assets(
+    data_dict: Dict[str, pd.DataFrame],
+    tickers: List[str],
+    lookback: int,
+    stress_method: str = "vol",
+    vol_multiplier: float = 1.5,
+    market_ticker: str = "SPY",
+) -> pd.DataFrame:
+    """
+    Compute average pairwise correlation using only stress-regime observations, capturing crisis co-movement that standard rolling correlation masks (Ang & Chen 2002).
+
+    Notes
+    -----
+    Two regime filters are supported: ``"vol"`` flags days where SPY 21-day vol exceeds
+    ``vol_multiplier × rolling median``; ``"drawdown"`` flags days where SPY is below its
+    200-day SMA (Faber 2007).  When fewer than ``lookback // 4`` stress days fall inside
+    the lookback window the function falls back to standard rolling correlation rather than
+    returning NaN — this most commonly affects the ``"drawdown"`` method in prolonged
+    bull markets.
+    """
+    if market_ticker not in data_dict:
+        raise KeyError(
+            f"Market proxy '{market_ticker}' not found in data_dict. "
+            "Ensure it is downloaded alongside the sleeve tickers."
+        )
+
+    available = [t for t in tickers if t in data_dict]
+    if not available:
+        return pd.DataFrame()
+
+    # Build returns DataFrame for sleeve assets.
+    returns_df = pd.DataFrame(
+        {t: data_dict[t]["Close"].pct_change(fill_method=None) for t in available}
+    )
+
+    spy_close = data_dict[market_ticker]["Close"]
+    spy_rets = spy_close.pct_change(fill_method=None)
+
+    # --- Build the stress indicator Series (1 = stress day, 0 = normal) ------
+    if stress_method == "vol":
+        # 21-day realized SPY vol (annualised not needed; ranking is relative).
+        spy_vol_21 = spy_rets.rolling(window=21, min_periods=21).std()
+        # Rolling median of that vol over the lookback window.
+        spy_vol_median = spy_vol_21.rolling(window=lookback, min_periods=lookback // 2).median()
+        # Stress if current 21-day vol exceeds vol_multiplier × rolling median.
+        stress_mask = (spy_vol_21 > vol_multiplier * spy_vol_median).astype(float)
+        stress_mask[spy_vol_21.isna() | spy_vol_median.isna()] = float("nan")
+    else:  # "drawdown"
+        # Faber (2007) bear-market filter: below 200-day SMA.
+        sma200 = spy_close.rolling(window=200, min_periods=200).mean()
+        stress_mask = (spy_close < sma200).astype(float)
+        stress_mask[sma200.isna()] = float("nan")
+
+    # Align all series to the common index of the returns DataFrame.
+    common_idx = returns_df.index
+    stress_mask = stress_mask.reindex(common_idx)
+
+    # Pre-compute the full-window standard pairwise correlation as a fallback
+    # so we don't leave NaN gaps on low-stress periods.
+    fallback_corr = compute_correlation_all_assets(data_dict, tickers, lookback)
+    fallback_corr = fallback_corr.reindex(common_idx)
+
+    n = len(available)
+    min_stress_obs = lookback // 4  # minimum stress days required for a valid estimate
+
+    result = pd.DataFrame(index=common_idx, columns=available, dtype=float)
+
+    # Iterate over dates from the first possible valid date.
+    # Using a loop because the stress mask changes dynamically and differs by date.
+    valid_dates = common_idx[lookback - 1:]
+    for date in valid_dates:
+        # Extract the lookback window ending on this date.
+        loc_end = common_idx.get_loc(date)
+        loc_start = max(0, loc_end - lookback + 1)
+        window_idx = common_idx[loc_start: loc_end + 1]
+
+        s_mask = stress_mask.loc[window_idx]
+        # Stress obs: rows where mask == 1 (non-NaN and True).
+        stress_days = s_mask[s_mask == 1.0].index
+        n_stress = len(stress_days)
+
+        if n_stress < min_stress_obs:
+            # Insufficient stress observations — fall back to standard rolling corr.
+            if date in fallback_corr.index and not fallback_corr.loc[date].isna().all():
+                result.loc[date] = fallback_corr.loc[date, available]
+            continue
+
+        # Compute pairwise correlation on stress days only.
+        stress_rets = returns_df.loc[stress_days]
+        if stress_rets.shape[0] < 2:
+            if date in fallback_corr.index:
+                result.loc[date] = fallback_corr.loc[date, available]
+            continue
+
+        corr_matrix = stress_rets.corr(method="pearson")
+
+        for t in available:
+            if t not in corr_matrix.columns or corr_matrix[t].isna().all():
+                result.at[date, t] = float("nan")
+                continue
+            row_sum = corr_matrix.loc[t].sum()
+            result.at[date, t] = (row_sum - 1.0) / (n - 1)
+
+    return result
+
+
+def compute_stress_blend_correlation_all_assets(
+    data_dict: Dict[str, pd.DataFrame],
+    tickers: List[str],
+    lookback: int,
+    vol_multiplier: float = 1.5,
+    market_ticker: str = "SPY",
+) -> pd.DataFrame:
+    """
+    Blend standard pairwise rolling correlation with vol-conditional stress correlation 50/50.
+
+    Pure stress correlation can be noisy due to few observations in low-vol regimes;
+    blending with the unconditional estimate stabilises the signal without requiring
+    a data-fitted blend weight.
+    """
+    pairwise = compute_correlation_all_assets(data_dict, tickers, lookback)
+    stress_vol = compute_stress_correlation_all_assets(
+        data_dict, tickers, lookback,
+        stress_method="vol",
+        vol_multiplier=vol_multiplier,
+        market_ticker=market_ticker,
+    )
+
+    # Align to the same index.
+    idx = pairwise.index.union(stress_vol.index)
+    pairwise = pairwise.reindex(idx)
+    stress_vol = stress_vol.reindex(idx)
+
+    # Stack and take the mean; nanmean so partial NaN is handled gracefully.
+    stacked = np.stack([pairwise.values, stress_vol.values], axis=0).astype(float)
+    blended = np.nanmean(stacked, axis=0)
+    # Keep fully NaN rows as NaN (not zero).
+    all_nan = np.all(np.isnan(stacked), axis=0)
+    blended[all_nan] = np.nan
+
+    result = pd.DataFrame(blended, index=idx, columns=pairwise.columns)
+    return result
+
+
+def compute_cross_sleeve_correlation(
+    data_dict: Dict[str, pd.DataFrame],
+    main_tickers: List[str],
+    hedge_tickers: List[str],
+    lookback: int,
+) -> pd.DataFrame:
+    """
+    Measure how much each main-sleeve asset co-moves with the hedging sleeve, identifying main-sleeve assets that would create redundant exposure alongside the hedges.
+
+    Notes
+    -----
+    Prices are forward-filled before computing returns so gaps in less-liquid
+    ETFs do not orphan otherwise valid correlation observations.
+    """
+    all_tickers = list(set(main_tickers) | set(hedge_tickers))
+    available_main = [t for t in main_tickers if t in data_dict]
+    available_hedge = [t for t in hedge_tickers if t in data_dict]
+
+    if not available_main or not available_hedge:
+        return pd.DataFrame()
+
+    # Align all price series on a common date index via forward-fill so gaps
+    # in less-liquid ETFs do not orphan otherwise valid correlation observations.
+    closes = pd.DataFrame(
+        {t: data_dict[t]["Close"] for t in all_tickers if t in data_dict}
+    ).ffill()
+    returns = closes.pct_change(fill_method=None)
+
+    result = pd.DataFrame(index=returns.index, columns=available_main, dtype=float)
+
+    for main_t in available_main:
+        if main_t not in returns.columns:
+            result[main_t] = float("nan")
+            continue
+        # Average rolling correlation with each hedge asset; then average across
+        # all hedges so the score is not driven by correlation with one outlier.
+        cross_corrs = []
+        for hedge_t in available_hedge:
+            if hedge_t not in returns.columns:
+                continue
+            pair_corr = (
+                returns[main_t]
+                .rolling(lookback, min_periods=lookback)
+                .corr(returns[hedge_t])
+            )
+            cross_corrs.append(pair_corr)
+
+        if not cross_corrs:
+            result[main_t] = float("nan")
+            continue
+
+        # Equal-weight average across all hedge pairings for asset main_t.
+        result[main_t] = pd.concat(cross_corrs, axis=1).mean(axis=1)
+
+    return result
+
+
+def compute_market_beta(
+    data_dict: Dict[str, pd.DataFrame],
+    tickers: List[str],
+    lookback: int,
+    market_ticker: str = "SPY",
+) -> pd.DataFrame:
+    """
+    Compute each asset's rolling OLS beta against the market proxy, capturing both correlation and relative volatility in a single sensitivity measure.
+
+    Notes
+    -----
+    Unlike correlation, beta is not bounded to ``[-1, 1]``; it equals
+    ``ρ × (σ_asset / σ_market)``, so two assets at the same correlation level can have
+    very different betas if they differ in volatility.  This matters for marginal
+    portfolio-variance contribution (Frazzini & Pedersen 2014 BAB factor).
+    """
+    if market_ticker not in data_dict:
+        raise KeyError(
+            f"Market proxy '{market_ticker}' not found in data_dict. "
+            "Ensure it is downloaded alongside the sleeve tickers."
+        )
+
+    available = [t for t in tickers if t in data_dict]
+    if not available:
+        return pd.DataFrame()
+
+    all_tickers = available + ([market_ticker] if market_ticker not in available else [])
+    returns_df = pd.DataFrame(
+        {t: data_dict[t]["Close"].pct_change(fill_method=None) for t in all_tickers}
+    )
+
+    market_rets = returns_df[market_ticker]
+
+    # Rolling Cov(asset, market) / Var(market).
+    # pandas rolling().cov() is element-wise when called with another Series.
+    rolling_var_market = market_rets.rolling(window=lookback, min_periods=lookback).var()
+
+    result = pd.DataFrame(index=returns_df.index, columns=available, dtype=float)
+    for t in available:
+        rolling_cov = (
+            returns_df[t]
+            .rolling(window=lookback, min_periods=lookback)
+            .cov(market_rets)
+        )
+        result[t] = rolling_cov / rolling_var_market
 
     return result

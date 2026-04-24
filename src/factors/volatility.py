@@ -1,21 +1,13 @@
 """
-Volatility Model factor (V) for AMAAM.
+Volatility factor (V) for AMAAM — see spec Section 3.3.
 
-Default estimator: Yang-Zhang (YZ), which uses OHLC data and explicitly
-captures the overnight gap component (Close → next Open).  YZ is
-drift-independent, ~8× more statistically efficient than close-to-close, and
-outperformed both the RiskMetrics EWMA baseline and Garman-Klass on IS/OOS
-Sharpe in all three measurement windows.
-
-The legacy RiskMetrics EWMA estimator (lambda=0.94) is retained as a named
-alternative for comparison and backward-compatibility.
-
-Lower annualised volatility → higher TRank → more likely to be selected.
-See Section 3.3 of the specification.
+Default estimator is Yang-Zhang (OHLC-based, drift-independent, ~8× more
+efficient than close-to-close). The legacy RiskMetrics EWMA estimator is
+retained for comparison. Lower vol → higher TRank → more likely selected.
 """
 
 import logging
-from typing import Dict
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -37,42 +29,14 @@ def compute_yang_zhang_vol(
     window: int,
 ) -> pd.Series:
     """
-    Compute Yang-Zhang annualised volatility for a single asset.
+    Compute rolling Yang-Zhang annualised volatility for a single asset.
 
-    Yang-Zhang (2000) decomposes total variance into three orthogonal
-    components, each estimated from a different aspect of daily price data:
-
-    ``σ²_YZ = σ²_overnight + k · σ²_open_close + (1 − k) · σ²_rogers_satchell``
-
-    Components:
-    * **Overnight** — variance of ln(Open_t / Close_{t-1}); captures gap risk
-      from macro announcements, earnings, Fed decisions, etc.
-    * **Open-to-close** — variance of ln(Close_t / Open_t); intraday drift.
-    * **Rogers-Satchell** — Σ[ln(H/C)·ln(H/O) + ln(L/C)·ln(L/O)] / n;
-      captures intraday volatility without assuming zero drift.
-
-    The optimal weighting coefficient k (Chou & Wang 2006) minimises the
-    estimator's mean-squared error:
-    ``k = 0.34 / (1.34 + (n+1)/(n−1))``
-
-    All three components are computed over a *window*-day rolling window
-    (min_periods = window so that early NaN rows are not reported).
-    The final series is annualised by √252.
-
-    Parameters
-    ----------
-    ohlc : pd.DataFrame
-        Must contain ``Open``, ``High``, ``Low``, ``Close`` columns.
-        Index is a DatetimeIndex of trading days.
-    window : int
-        Rolling window length in trading days (spec default: 84 — matched to
-        the momentum lookback so both factors share the same horizon).
-
-    Returns
-    -------
-    pd.Series
-        Annualised Yang-Zhang volatility.  The first ``window − 1`` rows are
-        NaN.  Same index as *ohlc*.
+    Notes
+    -----
+    YZ decomposes variance into three orthogonal terms:
+    ``σ²_YZ = σ²_overnight + k·σ²_open_close + (1−k)·σ²_rogers_satchell``
+    where k = 0.34 / (1.34 + (n+1)/(n−1)) is the Chou-Wang (2006) MSE-optimal
+    weight. The Rogers-Satchell term makes the estimator drift-independent.
     """
     o = np.log(ohlc["Open"])
     h = np.log(ohlc["High"])
@@ -83,15 +47,13 @@ def compute_yang_zhang_vol(
     # Chou-Wang (2006) optimal weighting for the open-to-close component.
     k = 0.34 / (1.34 + (window + 1) / (window - 1))
 
-    # Component 1: overnight return variance  ln(O_t / C_{t-1})
     overnight = o - c_prev
     var_overnight = overnight.rolling(window, min_periods=window).var(ddof=1)
 
-    # Component 2: open-to-close return variance  ln(C_t / O_t)
     open_close = c - o
     var_open_close = open_close.rolling(window, min_periods=window).var(ddof=1)
 
-    # Component 3: Rogers-Satchell intraday variance (drift-independent)
+    # Rogers-Satchell (1991): drift-independent intraday variance.
     rs = (h - c) * (h - o) + (l - c) * (l - o)
     var_rs = rs.rolling(window, min_periods=window).mean()
 
@@ -112,28 +74,13 @@ def compute_ewma_variance(
     init_window: int,
 ) -> pd.Series:
     """
-    Compute EWMA variance using the J.P. Morgan RiskMetrics recursion.
+    Compute RiskMetrics EWMA variance: ``σ²_t = λ·σ²_{t-1} + (1−λ)·r²_{t-1}``.
 
-    ``σ²_t = λ · σ²_{t-1} + (1 − λ) · r²_{t-1}``
-
-    Initialisation uses the population variance of the first ``init_window``
-    valid returns (Zangari 1996).  The recursive formula is then applied
-    forward from position ``init_window + 1``.
-
-    Parameters
-    ----------
-    returns : pd.Series
-        Daily log returns.  The first entry is typically NaN (no prior close).
-    lambda_param : float
-        Exponential decay factor.  RiskMetrics daily default is 0.94.
-    init_window : int
-        Number of returns used to seed the variance before the recursion.
-
-    Returns
-    -------
-    pd.Series
-        Daily EWMA variance estimates.  The first ``init_window`` rows are NaN.
-        Same index as *returns*.
+    Notes
+    -----
+    Seeded with population variance (ddof=0) over the first ``init_window``
+    returns, per the Zangari (1996) RiskMetrics convention. The recursion uses
+    the *previous* day's return, so the first ``init_window`` rows are NaN.
     """
     r = returns.values.astype(float)
     n = len(r)
@@ -184,30 +131,12 @@ def compute_volatility_model(
     """
     Legacy EWMA volatility pipeline: log returns → EWMA variance → SMA smooth → annualise.
 
-    Retained for backward-compatibility and comparative analysis.  The default
-    pipeline now uses Yang-Zhang via ``compute_volatility_all_assets``.
+    Retained for backward-compatibility; the default pipeline uses Yang-Zhang.
 
-    The SMA smoothing step is applied to the *variance* series (not to the
-    square-root vol) as specified in the RAAM paper.  Smoothing on variance
-    is less distorting than smoothing on volatility because it keeps the
-    estimator in variance space throughout.
-
-    Parameters
-    ----------
-    prices : pd.Series
-        Daily closing prices (adjusted).
-    lambda_param : float
-        EWMA decay factor (0.94 for RiskMetrics daily).
-    init_window : int
-        Number of returns for EWMA seed (spec default: 20).
-    smoothing_window : int
-        SMA window applied to the EWMA variance series (spec default: 10).
-
-    Returns
-    -------
-    pd.Series
-        Annualised volatility.  The first ``init_window + smoothing_window - 1``
-        rows are NaN.  Same index as *prices*.
+    Notes
+    -----
+    SMA smoothing is applied to the variance series (not the square-root vol)
+    to stay in variance space and avoid Jensen's inequality distortion.
     """
     log_returns = np.log(prices / prices.shift(1))
     log_returns.name = prices.name
@@ -234,27 +163,42 @@ def compute_volatility_all_assets(
     config: ModelConfig,
 ) -> pd.DataFrame:
     """
-    Compute Yang-Zhang volatility for every asset in a data dictionary.
+    Dispatch Yang-Zhang volatility computation across all assets and assemble into a DataFrame.
 
-    Yang-Zhang is the default estimator (IS/OOS testing confirmed it
-    outperforms both EWMA and Garman-Klass on Sharpe across all measurement
-    windows, with no IS-to-OOS rank reversal).
-
-    Parameters
-    ----------
-    data_dict : Dict[str, pd.DataFrame]
-        Mapping of ticker → OHLCV DataFrame.  Must contain ``Open``,
-        ``High``, ``Low``, and ``Close`` columns.
-    config : ModelConfig
-        Model configuration supplying ``yang_zhang_window`` (default: 84).
-
-    Returns
-    -------
-    pd.DataFrame
-        Annualised YZ volatility with dates as index and tickers as columns.
+    This is the primary entry point used by the backtest engine.
     """
     series = {
         ticker: compute_yang_zhang_vol(df, config.yang_zhang_window)
         for ticker, df in data_dict.items()
     }
     return pd.DataFrame(series)
+
+
+def compute_blended_yang_zhang_vol(
+    data_dict: Dict[str, pd.DataFrame],
+    lookbacks: List[int],
+) -> pd.DataFrame:
+    """
+    Equal-weight blend of Yang-Zhang volatility across multiple window lengths.
+
+    Mirrors the multi-horizon philosophy of blended momentum to reduce
+    sensitivity to any single lookback choice.
+
+    Notes
+    -----
+    Output is NaN until every component window has cleared its warm-up period,
+    so the longest lookback governs when valid values begin.
+    """
+    frames = {
+        lb: pd.DataFrame({
+            ticker: compute_yang_zhang_vol(df, lb)
+            for ticker, df in data_dict.items()
+        })
+        for lb in lookbacks
+    }
+    stacked = np.stack([frames[lb].values for lb in lookbacks], axis=0)
+    all_valid = np.all(~np.isnan(stacked), axis=0)
+    blended_values = np.nanmean(stacked, axis=0)
+    blended_values[~all_valid] = np.nan
+    ref = next(iter(frames.values()))
+    return pd.DataFrame(blended_values, index=ref.index, columns=ref.columns)

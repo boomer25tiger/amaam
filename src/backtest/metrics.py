@@ -123,16 +123,15 @@ def compute_all_metrics(
             cur_dur = 0
 
     # ── Sortino ratio ───────────────────────────────────────────────────────
-    # Uses downside deviation (std of returns below the risk-free hurdle) rather
-    # than total std, so it penalises only harmful volatility.  This is more
-    # appropriate for asymmetric return distributions like AMAAM, which truncates
-    # large losses via the momentum filter but still has a fat left tail.
-    downside_returns = excess_returns[excess_returns < 0]
-    if len(downside_returns) > 0:
-        downside_dev = float(math.sqrt((downside_returns ** 2).mean()) * math.sqrt(periods_per_year))
-        sortino = float(ann_return - risk_free_rate) / downside_dev if downside_dev > 0 else float("nan")
-    else:
-        sortino = float("nan")
+    # Industry-standard Sortino (Sortino & Price 1994, Bloomberg/HFR convention):
+    #   MAR = 0 (absolute-return hurdle: do not lose money).
+    #   Downside deviation = sqrt( mean_over_ALL_periods( min(r_t, 0)^2 ) ) * sqrt(ppy).
+    # Averaging over ALL periods — not just negative ones — matches the original
+    # paper and Bloomberg PORT, HFR, and Eurekahedge database reporting.
+    # Numerator = annualised return (MAR is 0, so no rf subtraction in numerator).
+    shortfall = np.minimum(returns.values, 0.0)      # positive months clipped to 0
+    downside_dev = float(math.sqrt(np.mean(shortfall ** 2)) * math.sqrt(periods_per_year))
+    sortino = float(ann_return / downside_dev) if downside_dev > 0 else float("nan")
 
     # ── Per-period extremes ─────────────────────────────────────────────────
     best_month = float(returns.max())
