@@ -20,7 +20,6 @@ correlation signals.
 9. [Additional Statistics](#additional-statistics)
 10. [Known Limitations](#known-limitations)
 11. [References](#references)
-12. [Module Structure and Refactoring Notes](#module-structure-and-refactoring-notes)
 
 ---
 
