@@ -501,59 +501,6 @@ and supplemented by findings from this implementation and validation.
 
 ---
 
-## Module Structure and Refactoring Notes
-
-The project follows a strict 400-line module limit. Several files have grown
-beyond this limit during iterative development. **No splits have been applied
-yet** — this section documents the proposed decomposition for the next
-refactoring pass.
-
-### Over-limit modules
-
-| Module | Lines | ×Limit | Priority |
-|--------|------:|------:|---------|
-| `src/visualization/matplotlib_charts.py` | ~2,347 | 5.9× | High |
-| `src/visualization/plotly_charts.py` | ~1,211 | 3.0× | High |
-| `src/factors/trend.py` | ~956 | 2.4× | Medium |
-| `src/factors/correlation.py` | ~919 | 2.3× | Medium |
-| `src/backtest/engine.py` | ~660 | 1.7× | Low |
-| `src/data/proxy.py` | ~616 | 1.5× | Low |
-| `src/data/validator.py` | ~431 | 1.1× | Low |
-
-### Proposed splits
-
-**`src/visualization/matplotlib_charts.py` → 4 files:**
-- `charts_performance.py` — Charts 01–09 (equity curves, returns, drawdowns)
-- `charts_allocation.py` — Charts 10–13 (allocation, heatmap, sleeve, turnover)
-- `charts_analysis.py` — Charts 14–23 (regime, sensitivity, costs, significance)
-- `charts_supplementary.py` — Charts 24–32 (scatter, ACF, walk-forward)
-
-**`src/visualization/plotly_charts.py` → same category split as matplotlib.**
-
-**`src/factors/trend.py` → 2 files:**
-- `trend_signals.py` — Individual signal computation functions (SMA, EMA,
-  Donchian, Keltner, ADX, etc.)
-- `trend_ensemble.py` — Ensemble combination, confidence scoring, and the
-  top-level `compute_trend_scores()` dispatcher
-
-**`src/factors/correlation.py` → 2 files:**
-- `correlation_pairwise.py` — Rolling pairwise correlation matrix computation
-- `correlation_portfolio.py` — Portfolio-level aggregation and scoring
-
-**`src/backtest/engine.py` → 2 files:**
-- `engine.py` — Public API (`run_backtest()`) and the main monthly loop
-- `_engine_helpers.py` — Private helpers for date alignment, factor
-  dispatch, and position sizing
-
-**`src/data/proxy.py` → 2 files:**
-- `proxy_synthetic.py` — Synthetic proxy construction from related tickers
-- `proxy_splice.py` — Splice-point detection and time-series stitching
-
-**`src/data/validator.py`** — Marginally over at 431 lines. Private check
-helpers could move to `_validator_checks.py` but the split is optional.
-
----
-
 ## Project Layout
 
 ```
