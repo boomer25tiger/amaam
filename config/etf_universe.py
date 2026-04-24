@@ -13,12 +13,27 @@ from typing import Dict, List
 
 @dataclass(frozen=True)
 class ETFInfo:
-    """Metadata for a single ETF in the universe."""
+    """
+    Metadata for a single ETF in the universe.
+
+    Attributes
+    ----------
+    ticker : str
+        Yahoo Finance ticker symbol.
+    name : str
+        Full fund name.
+    asset_class : str
+        Broad asset-class label used for grouping in charts and reports.
+    inception_date : str
+        Fund inception date, ISO format ``"YYYY-MM-DD"``. Dates before this
+        use proxy returns; the proxy construction is documented in
+        ``src/data/proxy.py``.
+    """
 
     ticker: str
     name: str
     asset_class: str
-    inception_date: str  # ISO format YYYY-MM-DD
+    inception_date: str
 
 
 # -----------------------------------------------------------------------------
@@ -76,11 +91,13 @@ HEDGING_SLEEVE: List[ETFInfo] = [
     ETFInfo("SHY", "iShares 1-3 Year Treasury Bond ETF",            "Cash Proxy / Capital Preserv.", "2002-07-22"),
 ]
 
-# UUP is the binding inception constraint: 2007-02-20.
-# With an 84-trading-day initialisation buffer the first valid signal is ~June 2007,
-# and the backtest live-trading window opens August 2007 (Section 4.2).
-BINDING_INCEPTION_TICKER: str = "UUP"
-BINDING_INCEPTION_DATE: str = "2007-02-20"
+# With 2004 data extension, SH proxy covers 2004-01-01→2006-06-18 (-1×SPY),
+# DBC proxy covers 2004-01-01→2006-02-05 (^BCOM rebased), and
+# UUP proxy covers 2004-01-01→2007-02-28 (DX-Y.NYB rebased).
+# The backtest warm-up buffer (84 trading days) means the first valid signal
+# is around 2004-05-01 and the live-trading window opens ~2004-06-01.
+BINDING_INCEPTION_TICKER: str = "EEM"   # earliest true binding constraint: 2003-04-14
+BINDING_INCEPTION_DATE: str = "2004-01-01"
 
 # Ticker used as the cash substitute whenever a hedging ETF fails the
 # momentum filter (Section 3.7).
@@ -92,11 +109,25 @@ CASH_PROXY: str = "SHY"
 
 @dataclass(frozen=True)
 class BenchmarkInfo:
-    """Metadata for a benchmark portfolio."""
+    """
+    Metadata for a benchmark portfolio.
+
+    Attributes
+    ----------
+    label : str
+        Short human-readable name used in chart legends and report tables.
+    tickers : List[str]
+        Ticker symbols that make up the benchmark.
+    weights : Dict[str, float]
+        Fixed allocation weights keyed by ticker, summing to 1.0.
+        An empty dict signals equal-weight allocation, rebalanced monthly.
+    description : str
+        Longer description of the benchmark's construction methodology.
+    """
 
     label: str
     tickers: List[str]
-    weights: Dict[str, float]  # fixed weights; empty dict = equal-weight rebalanced
+    weights: Dict[str, float]
     description: str
 
 
@@ -139,7 +170,6 @@ ALL_TICKERS: List[str] = sorted(
     | set(BENCHMARK_ONLY_TICKERS)
 )
 
-# Lookup dict for quick metadata access by ticker.
 ETF_METADATA: Dict[str, ETFInfo] = {
     e.ticker: e for e in MAIN_SLEEVE + HEDGING_SLEEVE
 }

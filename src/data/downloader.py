@@ -113,8 +113,14 @@ def download_historical_data(
             raw = yf.Ticker(ticker).history(
                 start=start_date,
                 end=end_date,
-                auto_adjust=True,   # all OHLC prices returned split/div-adjusted
-                actions=False,      # drop Dividends and Stock Splits columns
+                # Receive split- and dividend-adjusted prices so downstream
+                # momentum and return calculations reflect true economic returns
+                # without requiring manual adjustment logic.
+                auto_adjust=True,
+                # Exclude the Dividends and Stock Splits event columns; our
+                # factors only consume OHLCV prices, and the extra columns
+                # would require explicit filtering in every downstream module.
+                actions=False,
             )
             if raw.empty:
                 logger.warning("%s: yfinance returned empty DataFrame — skipping.", ticker)
@@ -186,6 +192,7 @@ def save_raw_data(
         Mapping of ticker → OHLCV DataFrame.
     output_dir : Path
         Destination directory. Created if it does not exist.
+
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

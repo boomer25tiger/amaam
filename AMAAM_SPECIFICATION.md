@@ -138,13 +138,16 @@ Where:
 
 **Purpose**: Determine asset profitability / trend strength.
 
-**Calculation**: 4-month Rate of Change (ROC) on daily closing prices.
+**Calculation**: Blended Rate of Change (ROC) across three horizons, equal-weighted.
 
 ```
-M = (Price_today / Price_{today - 84 trading days}) - 1
+M = mean(ROC_21d, ROC_63d, ROC_126d)
+ROC_n = (Price_today / Price_{today - n trading days}) - 1
 ```
 
-- Lookback: 84 trading days (approximately 4 calendar months)
+- Lookbacks: 21 trading days (~1 month), 63 (~3 months), 126 (~6 months)
+- Equal-weight average reduces single-lookback regime sensitivity (Asness et al. 2013)
+- `momentum_blend = True` in config activates this; `momentum_blend_lookbacks = [21, 63, 126]`
 - Computed daily, but only the month-end value is used for ranking
 - The same M value serves dual purpose: (1) input to Rank(M) for TRank, and (2) the momentum filter that determines whether a selected asset stays in the portfolio or gets replaced by cash/hedging
 
@@ -170,7 +173,7 @@ Where:
 - `σ²_RS` = Rogers-Satchell (1991) term: mean of (H−C)(H−O) + (L−C)(L−O)
   in log-price space; captures intra-day drift
 - `k = 0.34 / (1.34 + (n+1)/(n−1))` — Chou-Wang optimal mixing coefficient
-- `n = 84` trading days (matched to momentum_lookback; see `yang_zhang_window`
+- `n = 126` trading days (~6 calendar months; see `yang_zhang_window`
   in ModelConfig)
 
 All three component variances use the same rolling window `n`.
@@ -190,10 +193,10 @@ is no longer used in the main execution path.
 
 **Purpose**: Achieve portfolio diversification by favoring assets with low co-movement.
 
-**Calculation**: 4-month (84 trading day) average pairwise Pearson correlation of daily returns.
+**Calculation**: 6-month (126 trading day) average pairwise Pearson correlation of daily returns.
 
 For each asset `i` in the sleeve:
-1. Compute the correlation matrix of daily returns over the trailing 84 trading days for ALL assets in the sleeve.
+1. Compute the correlation matrix of daily returns over the trailing 126 trading days for ALL assets in the sleeve.
 2. Asset `i`'s correlation score `C_i` = average of all pairwise correlations between asset `i` and every other asset in the sleeve.
 
 ```
@@ -206,12 +209,45 @@ Where `r_i` and `r_j` are vectors of daily returns over the lookback window.
 
 **Important**: Correlations are computed within each sleeve independently. The main sleeve's C values reflect correlations among the 16 main sleeve ETFs. The hedging sleeve's C values reflect correlations among the 6 hedging ETFs. There is no cross-sleeve correlation computation.
 
-### 3.5 Factor 4: Keltner Channel Trend Direction (T)
+### 3.5 Factor 4: Trend Direction (T)
 
-**Purpose**: Determine asset trend direction using an asymmetric Keltner
-Channel that adjusts dynamically to volatility.
+**Purpose**: Determine whether each asset is in an uptrend or downtrend.
+Signal T ∈ {+2, −2} enters the TRank formula directly.
 
-**Band formulas** (daily OHLC data):
+**Active method**: `trend_method = "sma200"` (SMA-200 crossover, Faber 2007).
+
+```
+T_t = +2   if Close_t > SMA(Close, 200)_t
+T_t = −2   if Close_t ≤ SMA(Close, 200)_t
+```
+
+Evaluated at each daily bar; month-end value used in TRank.
+No buffer zone, no carry — signal flips immediately on close vs SMA crossover.
+
+**Supported trend methods** (selectable via `config.trend_method`):
+
+| Value | Description |
+|---|---|
+| `"sma200"` | Close vs 200-day SMA — **active default** (Faber 2007) |
+| `"keltner"` | Asymmetric Keltner Channel (original spec method; see below) |
+| `"paper_atr"` | Original paper ATR formula variant |
+| `"sma_ratio"` | Close / SMA(200) with ±1% buffer zone |
+| `"sma_carry"` | SMA-200 with prior-signal carry (identical to sma200 at zero buffer) |
+| `"dual_sma"` | SMA(50) vs SMA(200) golden/death cross |
+| `"donchian"` | 200-day price-channel breakout (Turtle Trading) |
+| `"tsmom"` | 12-month return sign (Moskowitz, Ooi & Pedersen 2012) |
+| `"rolling_sharpe"` | Rolling 6-month Sharpe > 0 (Baz et al. 2015 / AQR) |
+| `"r2_trend"` | OLS slope > 0 AND R² ≥ 0.65 over 126 days |
+| `"macd"` | MACD(12,26) zero-line cross (Appel 1979) |
+| `"ensemble"` | Majority vote across all methods above |
+
+Walk-forward testing across seven 2-year OOS windows confirmed `"sma200"` as
+the most robust method; it tied with `"sma_ratio"` on IS Sharpe but required
+zero buffer parameters.
+
+**Keltner Channel (legacy — retained for reference)**
+
+The original implementation used an asymmetric Keltner Channel:
 
 ```
 ATR_t  = (1/42) × Σ_{i=0}^{41} TR_{t-i}       (SMA of True Range, NOT Wilder)
@@ -351,7 +387,7 @@ Where the sum is over all selected assets in the sleeve (after momentum filter).
 - **Frequency**: Daily
 - **Fields**: Open, High, Low, Close (adjusted for splits and dividends), Volume
 - **Period**: From earliest common inception date through present
-- **Binding constraint**: UUP (Invesco DB US Dollar Index Bullish Fund) launched February 2007. With a 4-month (84 trading day) lookback for initialization, the first usable signal date is approximately June 2007. Backtest live trading begins August 2007 to allow additional buffer.
+- **Binding constraint**: All ETFs have data back to at least 2003–2004. With proxy series extending SH, DBC, and UUP back to 2004-01-01, and a 126-day initialisation buffer, the first valid signal month is approximately 2005-05. Backtest live trading begins 2005-07 to allow an additional buffer.
 
 ### 4.3 Data Validation
 
@@ -373,13 +409,13 @@ During Phase 1, the following checks must be performed on all downloaded data:
 
 ### 5.1 Backtest Period
 
-- **Start**: August 2007 (first month with valid signals for all ETFs)
+- **Start**: 2004-01-01 data load; first live signal month 2005-07
 - **End**: April 2026 (present)
 - **Total**: approximately 225 months (18.75 years)
 
 ### 5.2 Train/Test Split
 
-- **Development period**: August 2007 — December 2017 (125 months, 10.4 years)
+- **Development period**: 2005-07 — 2017-12 (150 months, 12.5 years)
 - **Holdout period**: January 2018 — April 2026 (100 months, 8.3 years)
 - All design decisions are finalized using only the development period. The holdout is run ONCE at the end.
 
@@ -427,10 +463,11 @@ All metrics computed for the AMAAM and each benchmark, across all transaction co
 |--------|-------------|
 | Annualized Return | Geometric mean annual return |
 | Annualized Volatility | Standard deviation of returns, annualized (√252 for daily, √12 for monthly) |
-| Sharpe Ratio | (Annualized Return - Risk Free Rate) / Annualized Volatility. Use 3-month T-bill rate or fixed 2% as risk-free. |
-| Calmar Ratio | Annualized Return / abs(Max Drawdown) |
-| Max Drawdown | Largest peak-to-trough decline |
-| Max Drawdown Duration | Longest time (in months) to recover from a drawdown |
+| Sharpe Ratio | (Annualized Return − rf) / Annualized Volatility. rf = 2% per year (fixed). Monthly rf derived as (1.02)^(1/12) − 1. |
+| Sortino Ratio | Annualized Return / Downside Deviation. MAR = 0 (absolute-return hurdle). Downside Deviation = sqrt(mean_over_ALL_months(min(r_t, 0)²)) × sqrt(12). Averaging over all months — not just negative ones — is the Sortino & Price (1994) original definition and matches Bloomberg PORT / HFR / Eurekahedge convention. |
+| Calmar Ratio | Annualized Return / abs(Max Drawdown). No rf subtraction in numerator (industry standard). |
+| Max Drawdown | Largest peak-to-trough decline in the equity curve |
+| Max Drawdown Duration | Longest consecutive run of months below the prior equity peak |
 | Best Month | Highest single-month return |
 | Worst Month | Lowest single-month return |
 | Best Year | Highest calendar-year return |
@@ -600,45 +637,65 @@ Python dataclass containing all configurable model parameters. Every adjustable 
 
 ```python
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List
 
 @dataclass
 class ModelConfig:
-    # Factor lookback periods (trading days)
-    momentum_lookback: int = 84  # ~4 months
-    volatility_lambda: float = 0.94  # EWMA decay factor
-    volatility_smoothing: int = 10  # SMA smoothing window for vol
-    correlation_lookback: int = 84  # ~4 months
-    atr_period: int = 42
-    atr_upper_lookback: int = 63  # Highest close lookback
-    atr_lower_lookback: int = 105  # Highest low lookback
+    # ── Momentum ──────────────────────────────────────────────────────────────
+    momentum_lookback: int = 84          # fallback single-window lookback (unused when blend=True)
+    momentum_blend: bool = True          # blend multiple ROC horizons (Asness et al. 2013)
+    momentum_blend_lookbacks: List[int] = field(default_factory=lambda: [21, 63, 126])
+    momentum_skip_days: int = 0          # Jegadeesh-Titman skip; 0 = no skip
 
-    # Factor weights (see Section 3.6 for calibration rationale)
+    # ── Volatility ────────────────────────────────────────────────────────────
+    volatility_lambda: float = 0.94      # RiskMetrics EWMA decay factor
+    volatility_smoothing: int = 10       # SMA smoothing window for vol
+    yang_zhang_window: int = 126         # Yang-Zhang rolling window (~6 months)
+    vol_blend: bool = False
+    vol_blend_lookbacks: List[int] = field(default_factory=lambda: [21, 63, 126, 252])
+
+    # ── Correlation ───────────────────────────────────────────────────────────
+    correlation_lookback: int = 126      # ~6 months
+    correlation_method: str = "pairwise" # see Section 3.4 for all valid values
+    correlation_blend: bool = False
+    correlation_blend_lookbacks: List[int] = field(default_factory=lambda: [21, 63, 126, 252])
+    correlation_ewm_span: int = 126
+    cross_sleeve_lambda: float = 0.5
+    stress_vol_multiplier: float = 1.5
+
+    # ── Trend ─────────────────────────────────────────────────────────────────
+    trend_method: str = "sma200"         # see Section 3.5 for all valid values
+    atr_period: int = 42
+    atr_upper_lookback: int = 63
+    atr_lower_lookback: int = 105
+    trend_rank_scale: bool = False       # if True, rank T before entering TRank
+
+    # ── Factor weights (Section 3.6) ──────────────────────────────────────────
     weight_momentum: float = 0.65
     weight_volatility: float = 0.25
     weight_correlation: float = 0.10
-    weight_trend: float = 1.0  # Scale factor for T in TRank
+    weight_trend: float = 1.0
 
-    # Selection parameters
+    # ── Selection ─────────────────────────────────────────────────────────────
     main_sleeve_top_n: int = 6
     hedging_sleeve_top_n: int = 2
 
-    # Weighting scheme: "equal" or "inverse_volatility"
-    weighting_scheme: str = "equal"
+    # ── Weighting ─────────────────────────────────────────────────────────────
+    weighting_scheme: str = "equal"      # "equal" or "inverse_volatility"
 
-    # Rebalancing
-    rebalancing_frequency: str = "monthly"  # "monthly" or "biweekly"
+    # ── Rebalancing ───────────────────────────────────────────────────────────
+    rebalancing_frequency: str = "monthly"
 
-    # Transaction costs (round trip, in decimal: 0.0010 = 10 bps)
-    transaction_cost: float = 0.0010
+    # ── Transaction costs (one-way, decimal: 0.0005 = 5 bps) ─────────────────
+    transaction_cost: float = 0.0005
 
-    # Backtest period
-    backtest_start: str = "2007-08-01"
+    # ── Backtest period ───────────────────────────────────────────────────────
+    backtest_start: str = "2004-01-01"
     backtest_end: str = "2026-04-10"
     holdout_start: str = "2018-01-01"
 
-    # Yang-Zhang volatility window (trading days); matched to momentum_lookback
-    yang_zhang_window: int = 84
+    # ── EWMA initialisation ───────────────────────────────────────────────────
+    volatility_init_window: int = 20
 ```
 
 ### 9.2 config/etf_universe.py
@@ -700,7 +757,7 @@ Definitions of the ETF universes for each sleeve, plus benchmarks. Includes tick
 - `compute_atr(high, low, close, period) -> pd.Series`: 42-period SMA of True Range.
 - `compute_atr_bands(high, low, close, atr_period, upper_ema_span, lower_ema_span) -> Tuple[pd.Series, pd.Series]`: Returns asymmetric Keltner Channel upper and lower bands.
 - `compute_trend_signal(high, low, close, atr_period, upper_ema_span, lower_ema_span) -> pd.Series`: Returns Series of +2/−2 persistent trend signals.
-- `compute_trend_all_assets(data_dict, config) -> pd.DataFrame`: Computes Keltner Channel trend for all assets.
+- `compute_trend_all_assets(data_dict, config) -> pd.DataFrame`: Dispatches to the trend method specified by `config.trend_method` and computes the T signal for all assets. Default: `"sma200"`.
 
 ### 9.10 src/ranking/trank.py
 

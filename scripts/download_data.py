@@ -10,8 +10,9 @@ Usage (from project root)::
 
     python scripts/download_data.py                   # first-time download
     python scripts/download_data.py --force           # force re-download
-    python scripts/download_data.py --start 2007-08-01 --end 2026-04-10
+    python scripts/download_data.py --start 2004-01-01 --end 2026-04-10
     python scripts/download_data.py -v                # verbose DEBUG output
+    python scripts/download_data.py --no-proxy        # skip proxy construction
 """
 
 import argparse
@@ -31,7 +32,12 @@ from src.data.downloader import (                                      # noqa: E
     load_raw_data,
     save_raw_data,
 )
+from src.data.proxy import construct_all_proxies                       # noqa: E402
 from src.data.validator import align_trading_calendar, validate_universe  # noqa: E402
+
+# Proxy source tickers — needed for pre-inception series construction but
+# must NOT be written to the processed/ directory as model tickers.
+_PROXY_SOURCE_TICKERS: list = ["^BCOM", "DX-Y.NYB"]
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +108,13 @@ def _parse_args() -> argparse.Namespace:
         "--verbose", "-v", action="store_true",
         help="Enable DEBUG-level console output.",
     )
+    parser.add_argument(
+        "--no-proxy", action="store_true",
+        help=(
+            "Skip proxy construction for SH, DBC, and UUP.  "
+            "Use this flag for testing or debugging when only raw downloads are needed."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -110,15 +123,26 @@ def _parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 def main() -> int:  # noqa: C901
-    """Execute the full download → validate → align → save pipeline."""
+    """Execute the full download → proxy → validate → align → save pipeline."""
     args = _parse_args()
     _configure_logging(args.verbose)
     log = logging.getLogger(__name__)
 
+    # Decide which tickers to download: model universe + proxy sources (unless
+    # --no-proxy is set, in which case proxy source tickers are not needed).
+    download_tickers = list(ALL_TICKERS)
+    if not args.no_proxy:
+        # Add proxy source tickers that are not already in the model universe.
+        for t in _PROXY_SOURCE_TICKERS:
+            if t not in download_tickers:
+                download_tickers.append(t)
+
     log.info("=" * 60)
     log.info("AMAAM Data Download")
-    log.info("Tickers : %d", len(ALL_TICKERS))
-    log.info("Period  : %s → %s", args.start, args.end)
+    log.info("Model tickers   : %d", len(ALL_TICKERS))
+    log.info("Proxy sources   : %s", _PROXY_SOURCE_TICKERS if not args.no_proxy else "skipped")
+    log.info("Total to fetch  : %d", len(download_tickers))
+    log.info("Period          : %s → %s", args.start, args.end)
     log.info("=" * 60)
 
     # ------------------------------------------------------------------
@@ -138,7 +162,7 @@ def main() -> int:  # noqa: C901
         raw_data = load_raw_data(args.raw_dir)
     else:
         raw_data = download_historical_data(
-            tickers=ALL_TICKERS,
+            tickers=download_tickers,
             start_date=args.start,
             end_date=args.end,
         )
@@ -148,10 +172,36 @@ def main() -> int:  # noqa: C901
         save_raw_data(raw_data, args.raw_dir)
 
     # ------------------------------------------------------------------
-    # Step 2: Validate all tickers against Section 4.3 checks
+    # Step 2 (optional): Build and splice proxy series for SH, DBC, UUP
+    # ------------------------------------------------------------------
+    if args.no_proxy:
+        log.info("--no-proxy flag set — skipping proxy construction.")
+        # Exclude proxy source tickers from subsequent processing since they
+        # were not downloaded.
+        proxied_data = {t: df for t, df in raw_data.items() if t in ALL_TICKERS}
+    else:
+        log.info(
+            "Constructing proxy series for SH, DBC, UUP back to %s...", args.start
+        )
+        try:
+            # construct_all_proxies returns the model universe with SH/DBC/UUP
+            # replaced by spliced series; proxy source tickers are stripped out.
+            proxied_data = construct_all_proxies(raw_data, start_date=args.start)
+        except ValueError as exc:
+            log.error("Proxy construction failed: %s", exc)
+            return 1
+
+        # Confirm proxy source tickers were removed.
+        for src in _PROXY_SOURCE_TICKERS:
+            if src in proxied_data:
+                proxied_data.pop(src)
+                log.debug("Removed proxy source ticker %s from processed set.", src)
+
+    # ------------------------------------------------------------------
+    # Step 3: Validate all tickers against Section 4.3 checks
     # ------------------------------------------------------------------
     log.info("Running Section 4.3 validation checks...")
-    issues = validate_universe(raw_data)
+    issues = validate_universe(proxied_data)
 
     # Distinguish hard failures (unexpected data errors) from soft warnings
     # ([MANUAL REVIEW] items that need a human look but don't block processing)
@@ -185,30 +235,36 @@ def main() -> int:  # noqa: C901
                 log.warning("  %-6s %s", ticker + ":", msg)
 
     # Remove hard-failure tickers before alignment so they don't propagate.
-    clean_data = {t: df for t, df in raw_data.items() if t not in hard_failures}
+    clean_data = {t: df for t, df in proxied_data.items() if t not in hard_failures}
 
     if not clean_data:
         log.error("No tickers passed validation. Aborting.")
         return 1
 
     # ------------------------------------------------------------------
-    # Step 3: Align all series to the NYSE trading calendar
+    # Step 4: Align all series to the NYSE trading calendar
     # ------------------------------------------------------------------
     log.info("Aligning to NYSE trading calendar (Section 4.3, check 8)...")
     try:
-        aligned_data = align_trading_calendar(clean_data)
+        # Pass force_start so that late-inception benchmark-only tickers
+        # (e.g. IGOV, which starts 2009-01-30) do not restrict the alignment
+        # window for the full model universe.  Those tickers will be
+        # forward-filled from their actual first date.
+        aligned_data = align_trading_calendar(clean_data, force_start=args.start)
     except ValueError as exc:
         log.error("Calendar alignment failed: %s", exc)
         return 1
 
     # ------------------------------------------------------------------
-    # Step 4: Save processed data
+    # Step 5: Save processed data
+    # Proxy source tickers (^BCOM, DX-Y.NYB) were removed in Step 2 and are
+    # never written here.  Only model-universe tickers reach this point.
     # ------------------------------------------------------------------
     save_raw_data(aligned_data, args.processed_dir)
     log.info("Processed data written to %s.", args.processed_dir)
 
     # ------------------------------------------------------------------
-    # Step 5: Summary
+    # Step 6: Summary
     # ------------------------------------------------------------------
     any_df = next(iter(aligned_data.values()))
     n_sessions = len(any_df)
@@ -217,7 +273,7 @@ def main() -> int:  # noqa: C901
 
     log.info("=" * 60)
     log.info("Summary")
-    log.info("  Tickers downloaded      : %d / %d", len(raw_data), len(ALL_TICKERS))
+    log.info("  Tickers downloaded      : %d / %d", len(raw_data), len(download_tickers))
     log.info("  Tickers in processed/   : %d", len(aligned_data))
     log.info("  Trading sessions        : %d (%s → %s)", n_sessions, date_min, date_max)
     log.info(
