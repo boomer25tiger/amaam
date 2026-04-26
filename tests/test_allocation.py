@@ -94,21 +94,21 @@ class TestComputeHedgingAllocation:
     def test_both_active_split_equally(self):
         """Both hedging ETFs pass momentum filter → each gets half the weight."""
         mom = _mom(H1=0.05, H2=0.03)
-        weights = compute_hedging_allocation(HEDGE_2, mom, 1/3, _cfg())
+        weights = compute_hedging_allocation(HEDGE_2, mom, 1/3)
         assert weights["H1"] == pytest.approx(1/6)
         assert weights["H2"] == pytest.approx(1/6)
 
     def test_one_fails_slot_goes_to_shy(self):
         """H2 fails (M ≤ 0): H1 gets its slot, SHY gets H2's slot."""
         mom = _mom(H1=0.05, H2=-0.01)
-        weights = compute_hedging_allocation(HEDGE_2, mom, 0.4, _cfg())
+        weights = compute_hedging_allocation(HEDGE_2, mom, 0.4)
         assert weights["H1"] == pytest.approx(0.2)
         assert weights[CASH_PROXY] == pytest.approx(0.2)
 
     def test_both_fail_all_to_shy(self):
         """Both hedging ETFs fail → entire redirected weight to SHY."""
         mom = _mom(H1=-0.02, H2=-0.05)
-        weights = compute_hedging_allocation(HEDGE_2, mom, 0.5, _cfg())
+        weights = compute_hedging_allocation(HEDGE_2, mom, 0.5)
         assert weights.get(CASH_PROXY, 0.0) == pytest.approx(0.5)
         assert "H1" not in weights
         assert "H2" not in weights
@@ -117,24 +117,24 @@ class TestComputeHedgingAllocation:
         """Total of returned weights must equal the redirected_weight argument."""
         for rw in [1/6, 2/6, 1.0]:
             mom = _mom(H1=0.03, H2=-0.01)
-            w = compute_hedging_allocation(HEDGE_2, mom, rw, _cfg())
+            w = compute_hedging_allocation(HEDGE_2, mom, rw)
             assert sum(w.values()) == pytest.approx(rw)
 
     def test_zero_redirected_weight_returns_empty(self):
         """No weight to distribute → return empty dict, not a zero-weight entry."""
         mom = _mom(H1=0.05, H2=0.03)
-        weights = compute_hedging_allocation(HEDGE_2, mom, 0.0, _cfg())
+        weights = compute_hedging_allocation(HEDGE_2, mom, 0.0)
         assert weights == {}
 
     def test_empty_hedging_rankings_all_to_shy(self):
         """No hedging ETFs available → full redirected weight to SHY."""
-        weights = compute_hedging_allocation([], _mom(), 0.25, _cfg())
+        weights = compute_hedging_allocation([], _mom(), 0.25)
         assert weights[CASH_PROXY] == pytest.approx(0.25)
 
     def test_three_way_tie_slots_split_in_thirds(self):
         """Keller tie-inclusion: 3 hedging ETFs selected → each gets 1/3 of weight."""
         mom = _mom(H1=0.05, H2=0.03, H3=0.01)
-        weights = compute_hedging_allocation(["H1", "H2", "H3"], mom, 0.3, _cfg())
+        weights = compute_hedging_allocation(["H1", "H2", "H3"], mom, 0.3)
         assert weights["H1"] == pytest.approx(0.1)
         assert weights["H2"] == pytest.approx(0.1)
         assert weights["H3"] == pytest.approx(0.1)

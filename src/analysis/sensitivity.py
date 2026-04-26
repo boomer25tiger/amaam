@@ -107,6 +107,22 @@ def run_weight_sensitivity(
         row_eq[col] = result_eq.metrics.get(col, float("nan"))
     records.append(row_eq)
 
+    # Canonical row: wM=0.65, wV=0.25, wC=0.10 — the calibrated design weights.
+    # Added explicitly because the canonical does not live on the equal-split
+    # subspace (wV ≠ wC), so the sweep grid never hits it.
+    logger.info("Weight sweep: Canonical (wM=0.65, wV=0.25, wC=0.10)")
+    cfg_canon = replace(
+        config,
+        weight_momentum=0.65,
+        weight_volatility=0.25,
+        weight_correlation=0.10,
+    )
+    result_canon = run_backtest(data_dict, cfg_canon)
+    row_canon: dict = {"wM": 0.65, "wV": 0.25, "wC": 0.10, "label": "Canonical"}
+    for col in _WEIGHT_COLS:
+        row_canon[col] = result_canon.metrics.get(col, float("nan"))
+    records.append(row_canon)
+
     df = pd.DataFrame(records)
     df = df.set_index("label")
     return df[["wM", "wV", "wC"] + _WEIGHT_COLS]
@@ -188,9 +204,9 @@ def run_rebalancing_sensitivity(
         "Avg Monthly Turnover"]``.
     """
     frequencies = ["monthly", "biweekly"]
-    # Zero-cost baseline exposes pure frequency effect; 10 bps is default;
-    # 15 bps stress-tests higher-cost environments.
-    costs = [0.0, 0.0010, 0.0015]
+    # Zero-cost baseline exposes pure frequency effect; 5 bps matches the
+    # canonical default; 10 bps stress-tests higher-cost environments.
+    costs = [0.0, 0.0005, 0.0010]
 
     records: List[dict] = []
 

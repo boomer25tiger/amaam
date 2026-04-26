@@ -64,7 +64,6 @@ def compute_hedging_allocation(
     hedging_rankings: List[str],
     momentum_values: pd.Series,
     redirected_weight: float,
-    config: ModelConfig,
 ) -> Dict[str, float]:
     """
     Allocate the redirected portfolio weight across the hedging sleeve.
@@ -84,9 +83,6 @@ def compute_hedging_allocation(
     redirected_weight : float
         Total portfolio weight to distribute (e.g. 0.333 when 2 of 6 main
         sleeve assets failed the momentum filter).
-    config : ModelConfig
-        Model configuration (used for ``CASH_PROXY`` identity resolution and
-        future extensibility).
 
     Returns
     -------
@@ -139,7 +135,6 @@ def compute_monthly_allocation(
     hedging_momentum: pd.Series,
     config: ModelConfig,
     main_volatility: Optional[pd.Series] = None,
-    hedging_volatility: Optional[pd.Series] = None,
 ) -> Dict[str, float]:
     """
     Assemble the complete monthly portfolio allocation for both sleeves.
@@ -179,9 +174,6 @@ def compute_monthly_allocation(
         Yang-Zhang (or alternative) annualised volatility values for main
         sleeve tickers.  Required when
         ``config.weighting_scheme == "inverse_volatility"``.
-    hedging_volatility : pd.Series, optional
-        Reserved for future use; hedging sleeve always uses equal-slot
-        distribution per the spec.
 
     Returns
     -------
@@ -235,7 +227,6 @@ def compute_monthly_allocation(
             hedging_rankings,
             hedging_momentum,
             redirected_weight,
-            config,
         )
         for ticker, weight in hedging_weights.items():
             # Accumulate rather than overwrite: SHY may already be in main.

@@ -291,6 +291,102 @@ class TestSelectTopN:
 
 
 # ---------------------------------------------------------------------------
+# TestSelectionHysteresis — exit_buffer keeps incumbents while inside the zone
+# ---------------------------------------------------------------------------
+
+class TestSelectionHysteresis:
+    """Incumbents persist until they drop below top-(n + exit_buffer)."""
+
+    def test_no_buffer_standard_exit(self):
+        """exit_buffer=0 behaves identically to the standard top-N rule."""
+        tranks = _s({"A": 5.0, "B": 4.0, "C": 3.0, "D": 2.0})
+        # A and B were previously selected; C is now ranked 3rd (outside top-2).
+        selected = select_top_n(tranks, n=2, prev_selected=["A", "B"], exit_buffer=0)
+        assert set(selected) == {"A", "B"}
+
+    def test_incumbent_retained_within_buffer(self):
+        """
+        With exit_buffer=1 and n=2, exit threshold is at rank 3.
+        B has dropped to rank 3 (TRank=3.0); it is retained as an incumbent.
+        D is at rank 4 and never held — not retained.
+        """
+        tranks = _s({"A": 5.0, "C": 4.0, "B": 3.0, "D": 2.0})
+        # Previously held: A and B. B slipped from rank 2 to rank 3.
+        selected = select_top_n(tranks, n=2, prev_selected=["A", "B"], exit_buffer=1)
+        assert "A" in selected  # new top-2 entry
+        assert "B" in selected  # incumbent retained within buffer
+        assert "D" not in selected  # not held and outside top-2
+
+    def test_incumbent_dropped_outside_buffer(self):
+        """
+        With exit_buffer=1 and n=2, exit threshold is at rank 3.
+        B has dropped to rank 4 (outside the exit zone) — must be dropped.
+        """
+        tranks = _s({"A": 5.0, "C": 4.0, "D": 3.0, "B": 2.0})
+        selected = select_top_n(tranks, n=2, prev_selected=["A", "B"], exit_buffer=1)
+        assert "A" in selected
+        assert "C" in selected  # enters as new top-2 asset
+        assert "B" not in selected  # incumbent dropped: rank 4 > n + buffer = 3
+
+    def test_new_entrant_requires_top_n_rank(self):
+        """
+        An asset NOT in prev_selected must rank within top-N to enter,
+        regardless of exit_buffer.
+        """
+        tranks = _s({"A": 5.0, "B": 4.0, "C": 3.0, "D": 2.0})
+        # Previously held: A only. C is ranked 3rd (outside top-2) — must not enter.
+        selected = select_top_n(tranks, n=2, prev_selected=["A"], exit_buffer=2)
+        assert "A" in selected
+        assert "B" in selected   # standard top-2 entry
+        assert "C" not in selected  # ranked 3rd, not previously held
+
+    def test_buffer_larger_than_pool_retains_all_incumbents(self):
+        """
+        When n + exit_buffer >= total assets, all incumbents are retained
+        regardless of their current rank.
+        """
+        tranks = _s({"A": 5.0, "B": 4.0, "C": 3.0})
+        # n=2, exit_buffer=5 → exit zone covers all 3 assets.
+        selected = select_top_n(tranks, n=2, prev_selected=["A", "C"], exit_buffer=5)
+        assert "A" in selected
+        assert "C" in selected  # retained: exit zone covers the whole pool
+
+    def test_none_prev_selected_is_standard_topn(self):
+        """Passing prev_selected=None uses the standard top-N rule."""
+        tranks = _s({"A": 5.0, "B": 4.0, "C": 3.0, "D": 2.0})
+        selected_with_none  = select_top_n(tranks, n=2, prev_selected=None, exit_buffer=1)
+        selected_no_args    = select_top_n(tranks, n=2)
+        assert set(selected_with_none) == set(selected_no_args)
+
+    def test_empty_prev_selected_is_standard_topn(self):
+        """Passing prev_selected=[] uses the standard top-N rule."""
+        tranks = _s({"A": 5.0, "B": 4.0, "C": 3.0, "D": 2.0})
+        selected = select_top_n(tranks, n=2, prev_selected=[], exit_buffer=2)
+        assert set(selected) == {"A", "B"}
+
+    def test_buffer_two_keeps_incumbent_at_rank_four(self):
+        """
+        With n=2, exit_buffer=2, exit threshold is at rank 4.
+        An incumbent at rank 4 is at the exact boundary — it should be retained
+        (its TRank >= cutoff_exit, which is the 4th-best score).
+        """
+        tranks = _s({"A": 5.0, "C": 4.0, "D": 3.0, "B": 2.0})
+        # exit_n = 4 → cutoff_exit = sorted[3] = 2.0 → B (TRank=2.0) >= 2.0 → retained.
+        selected = select_top_n(tranks, n=2, prev_selected=["A", "B"], exit_buffer=2)
+        assert "B" in selected
+
+    def test_buffer_two_drops_incumbent_at_rank_five(self):
+        """
+        With n=2, exit_buffer=2, exit threshold is at rank 4.
+        An incumbent ranked 5th is outside the exit zone — must be dropped.
+        """
+        tranks = _s({"A": 5.0, "C": 4.0, "D": 3.0, "E": 2.0, "B": 1.0})
+        # exit_n = 4 → cutoff_exit = sorted[3] = 2.0 → B (TRank=1.0) < 2.0 → dropped.
+        selected = select_top_n(tranks, n=2, prev_selected=["A", "B"], exit_buffer=2)
+        assert "B" not in selected
+
+
+# ---------------------------------------------------------------------------
 # TestRankingDirection — end-to-end: raw factor values → ranks → TRank order
 # ---------------------------------------------------------------------------
 

@@ -9,13 +9,14 @@ weights, and metrics.
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 from config.default_config import ModelConfig
 from config.etf_universe import (
+    CASH_PROXY,
     HEDGING_SLEEVE_TICKERS,
     MAIN_SLEEVE_TICKERS,
 )
@@ -33,22 +34,10 @@ from src.factors.correlation import (
     compute_stress_correlation_all_assets,
 )
 from src.factors.momentum import compute_absolute_momentum, compute_blended_momentum
-from src.factors.trend import (
-    compute_trend_signal,
-    compute_paper_atr_signal,
-    compute_sma200_signal,
-    compute_sma_ratio_signal,
-    compute_sma_carry_signal,
-    compute_dual_sma_signal,
-    compute_donchian_signal,
-    compute_tsmom_signal,
-    compute_rolling_sharpe_signal,
-    compute_r2_trend_signal,
-    compute_macd_signal,
-    compute_trend_ensemble,
-)
+from src.factors.trend import compute_trend_all_assets
 from src.factors.volatility import compute_blended_yang_zhang_vol, compute_volatility_all_assets
 from src.portfolio.allocation import compute_monthly_allocation
+from src.portfolio.volatility_targeting import apply_vol_targeting
 from src.ranking.trank import compute_trank, rank_assets, select_top_n
 
 logger = logging.getLogger(__name__)
@@ -154,83 +143,8 @@ def _precompute_factors(
             {t: data_dict[t] for t in all_tickers}, config
         )
 
-    # Dispatch to the configured trend signal method.
-    _tm = config.trend_method
-    if _tm == "paper_atr":
-        trend = pd.DataFrame({
-            t: compute_paper_atr_signal(
-                data_dict[t]["High"], data_dict[t]["Low"], data_dict[t]["Close"],
-                config.atr_period, config.atr_upper_lookback, config.atr_lower_lookback,
-            )
-            for t in all_tickers
-        })
-    elif _tm == "sma200":
-        trend = pd.DataFrame({
-            t: compute_sma200_signal(data_dict[t]["Close"])
-            for t in all_tickers
-        })
-    elif _tm == "sma_ratio":
-        trend = pd.DataFrame({
-            t: compute_sma_ratio_signal(data_dict[t]["Close"])
-            for t in all_tickers
-        })
-    elif _tm == "sma_carry":
-        trend = pd.DataFrame({
-            t: compute_sma_carry_signal(data_dict[t]["Close"])
-            for t in all_tickers
-        })
-    elif _tm == "dual_sma":
-        trend = pd.DataFrame({
-            t: compute_dual_sma_signal(data_dict[t]["Close"])
-            for t in all_tickers
-        })
-    elif _tm == "donchian":
-        trend = pd.DataFrame({
-            t: compute_donchian_signal(data_dict[t]["Close"])
-            for t in all_tickers
-        })
-    elif _tm == "tsmom":
-        trend = pd.DataFrame({
-            t: compute_tsmom_signal(data_dict[t]["Close"])
-            for t in all_tickers
-        })
-    elif _tm == "rolling_sharpe":
-        trend = pd.DataFrame({
-            t: compute_rolling_sharpe_signal(data_dict[t]["Close"])
-            for t in all_tickers
-        })
-    elif _tm == "r2_trend":
-        trend = pd.DataFrame({
-            t: compute_r2_trend_signal(data_dict[t]["Close"])
-            for t in all_tickers
-        })
-    elif _tm == "macd":
-        trend = pd.DataFrame({
-            t: compute_macd_signal(data_dict[t]["Close"])
-            for t in all_tickers
-        })
-    elif _tm == "ensemble":
-        # Equal-weight composite: MACD (fast) + Keltner (medium) + SMA200 (slow).
-        # All parameters taken from spec / literature — no data-fitted values.
-        trend = pd.DataFrame({
-            t: compute_trend_ensemble(
-                data_dict[t]["High"],
-                data_dict[t]["Low"],
-                data_dict[t]["Close"],
-                config.atr_period,
-                config.atr_upper_lookback,
-                config.atr_lower_lookback,
-            )
-            for t in all_tickers
-        })
-    else:  # default: "keltner"
-        trend = pd.DataFrame({
-            t: compute_trend_signal(
-                data_dict[t]["High"], data_dict[t]["Low"], data_dict[t]["Close"],
-                config.atr_period, config.atr_upper_lookback, config.atr_lower_lookback,
-            )
-            for t in all_tickers
-        })
+    # Dispatch to the configured trend signal method via the canonical trend module.
+    trend = compute_trend_all_assets({t: data_dict[t] for t in all_tickers}, config)
 
     if config.correlation_blend:
         corr_main = compute_blended_correlation_all_assets(
@@ -370,8 +284,33 @@ def _allocation_at_date(
     main_tickers: List[str],
     hedge_tickers: List[str],
     config: ModelConfig,
-) -> Dict[str, float] | None:
-    """Rank tickers and compute sleeve allocations for a single signal date, returning ``None`` during the warm-up period when factors are still all-NaN."""
+    prev_main_selected: Optional[List[str]] = None,
+    prev_hedge_selected: Optional[List[str]] = None,
+) -> Optional[Tuple[Dict[str, float], List[str], List[str]]]:
+    """Rank tickers and compute sleeve allocations for a single signal date.
+
+    Returns ``None`` during the warm-up period when factors are still all-NaN.
+    Otherwise returns a 3-tuple ``(alloc, top_main, top_hedge)`` so the caller
+    can maintain previous-selection state for hysteresis across periods.
+
+    Parameters
+    ----------
+    signal_date : pd.Timestamp
+        Month-end (or bi-weekly) signal date.
+    factors : Dict[str, pd.DataFrame]
+        Pre-computed factor matrices from ``_precompute_factors``.
+    main_tickers : List[str]
+        Tickers in the main sleeve.
+    hedge_tickers : List[str]
+        Tickers in the hedging sleeve.
+    config : ModelConfig
+        Supplies selection counts, weights, and hysteresis settings.
+    prev_main_selected : List[str] or None
+        Main-sleeve selections from the previous period.  Fed to ``select_top_n``
+        when ``config.selection_exit_buffer > 0`` to apply exit hysteresis.
+    prev_hedge_selected : List[str] or None
+        Hedging-sleeve selections from the previous period.
+    """
     def _snap(df: pd.DataFrame, tickers: List[str]) -> pd.Series:
         """Last valid row at or before *signal_date* for *tickers*."""
         sub = df.loc[:signal_date, tickers]
@@ -419,15 +358,27 @@ def _allocation_at_date(
         logger.debug("Skipping %s — trank_hedge all NaN", signal_date.date())
         return None
 
-    top_main  = select_top_n(trank_main,  config.main_sleeve_top_n)
-    top_hedge = select_top_n(trank_hedge, config.hedging_sleeve_top_n)
+    # Apply selection hysteresis when configured: incumbents survive until they
+    # drop outside the wider top-(N + exit_buffer) zone rather than exiting
+    # immediately when they slip out of top-N.  exit_buffer=0 is the standard
+    # behaviour and is the default in ModelConfig.
+    buf = config.selection_exit_buffer
+    top_main  = select_top_n(
+        trank_main, config.main_sleeve_top_n,
+        prev_selected=prev_main_selected, exit_buffer=buf,
+    )
+    top_hedge = select_top_n(
+        trank_hedge, config.hedging_sleeve_top_n,
+        prev_selected=prev_hedge_selected, exit_buffer=buf,
+    )
 
     # Pass precomputed volatility so inverse_volatility weighting scheme
     # can use it; under the default "equal" scheme it is ignored.
-    return compute_monthly_allocation(
+    alloc = compute_monthly_allocation(
         top_main, top_hedge, M_main, M_hedge, config,
         main_volatility=V_main,
     )
+    return alloc, top_main, top_hedge
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +433,11 @@ def run_backtest(
 
     equity     = 1.0
     prev_alloc: Dict[str, float] = {}
+    # Previous sleeve selections are threaded across periods so hysteresis can
+    # compare the current TRank ranking against last month's holdings.  These
+    # start empty (no incumbents before the first live period).
+    prev_main_selected:  List[str] = []
+    prev_hedge_selected: List[str] = []
 
     for i, sig_date in enumerate(signal_dates[:-1]):
         next_sig = signal_dates[i + 1]
@@ -494,13 +450,29 @@ def run_backtest(
         if exec0 not in closes.index or exec1 not in closes.index:
             continue
 
-        alloc = _allocation_at_date(sig_date, factors, main_tickers, hedge_tickers, config)
-        if alloc is None:
+        result = _allocation_at_date(
+            sig_date, factors, main_tickers, hedge_tickers, config,
+            prev_main_selected, prev_hedge_selected,
+        )
+        if result is None:
             continue   # still in warm-up
+        alloc, prev_main_selected, prev_hedge_selected = result
+
+        if config.vol_targeting:
+            alloc = apply_vol_targeting(
+                alloc, closes, sig_date,
+                config.vol_target,
+                config.vol_target_lookback,
+                config.vol_target_max_leverage,
+                CASH_PROXY,
+            )
 
         all_keys = set(alloc) | set(prev_alloc)
         turnover = sum(abs(alloc.get(t, 0.0) - prev_alloc.get(t, 0.0)) for t in all_keys)
-        cost = turnover * config.transaction_cost / 2.0
+        # turnover = Σ|Δw|, which counts each leg (buy and sell) separately.
+        # transaction_cost is the one-way cost per leg, so the total cost is
+        # turnover × tc (no halving required).
+        cost = turnover * config.transaction_cost
 
         port_ret = 0.0
         for ticker, weight in alloc.items():

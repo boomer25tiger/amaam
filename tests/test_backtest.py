@@ -139,11 +139,15 @@ def cfg():
 
 
 def _run_with_fixed_alloc(data, config, alloc):
-    """Run backtest with _precompute_factors mocked and a fixed allocation."""
+    """Run backtest with _precompute_factors mocked and a fixed allocation.
+
+    ``_allocation_at_date`` now returns ``(alloc, top_main, top_hedge)`` so the
+    mock must wrap the dict in a tuple to match the updated engine contract.
+    """
     with patch("src.backtest.engine._precompute_factors") as mp, \
          patch("src.backtest.engine._allocation_at_date") as ma:
         mp.return_value = {}
-        ma.return_value = alloc
+        ma.return_value = (alloc, [], [])
         return run_backtest(data, config)
 
 
@@ -154,13 +158,13 @@ class TestBacktestEquityCurve:
         assert len(result.equity_curve) == 3
 
     def test_equity_curve_matches_manual_calculation(self, synthetic_data, cfg):
-        # Period 1: 100% initial rebalance, turnover=1.0, cost=0.001/2=0.0005
+        # Period 1: 100% initial rebalance, turnover=1.0, cost=1.0×0.001=0.001
         #           GLD return = 102/100 - 1 = 2%
-        #           net return = 0.02 - 0.0005 = 0.0195
+        #           net return = 0.02 - 0.001 = 0.019
         # Period 2 & 3: same allocation, turnover=0, cost=0, net return = 2%
         result = _run_with_fixed_alloc(synthetic_data, cfg, {"GLD": 1.0})
 
-        expected_1 = 1.0 * (1.0 + 0.02 - 0.0005)
+        expected_1 = 1.0 * (1.0 + 0.02 - 0.001)
         expected_2 = expected_1 * 1.02
         expected_3 = expected_2 * 1.02
 
@@ -195,17 +199,22 @@ class TestTransactionCosts:
         assert result.turnover.iloc[2] == pytest.approx(0.0, abs=1e-12)
 
     def test_cost_only_deducted_on_first_period(self, synthetic_data, cfg):
-        # Period 1 net return should be 0.0005 below period 2 net return
-        # (cost = 1.0 * 0.001 / 2 = 0.0005 on period 1 only).
+        # Period 1 net return should be 0.001 below period 2 net return
+        # (cost = turnover × tc = 1.0 × 0.001 = 0.001 on period 1 only).
         result = _run_with_fixed_alloc(synthetic_data, cfg, {"GLD": 1.0})
         gap = result.monthly_returns.iloc[1] - result.monthly_returns.iloc[0]
-        assert gap == pytest.approx(0.0005, rel=1e-6)
+        assert gap == pytest.approx(0.001, rel=1e-6)
 
     def test_full_allocation_switch_generates_double_turnover(self, synthetic_data, cfg):
         # Period 1: {} → GLD=1.0 → turnover = 1.0
         # Period 2: GLD=1.0 → SHY=1.0 → turnover = 2.0 (sell all GLD, buy all SHY)
         # Period 3: SHY=1.0 → SHY=1.0 → turnover = 0.0
-        allocs = [{"GLD": 1.0}, {"SHY": 1.0}, {"SHY": 1.0}]
+        # _allocation_at_date returns (alloc, top_main, top_hedge) tuples.
+        allocs = [
+            ({"GLD": 1.0}, ["GLD"], []),
+            ({"SHY": 1.0}, ["SHY"], []),
+            ({"SHY": 1.0}, ["SHY"], []),
+        ]
         it = iter(allocs)
 
         with patch("src.backtest.engine._precompute_factors") as mp, \
@@ -230,7 +239,8 @@ class TestTransactionCosts:
 class TestWarmupBehavior:
     def test_none_allocation_skips_period(self, synthetic_data, cfg):
         # First allocation returns None (warm-up) → only 2 periods produced.
-        allocs = [None, {"GLD": 1.0}, {"GLD": 1.0}]
+        # Non-None entries must be (alloc, top_main, top_hedge) tuples.
+        allocs = [None, ({"GLD": 1.0}, ["GLD"], []), ({"GLD": 1.0}, ["GLD"], [])]
         it = iter(allocs)
 
         with patch("src.backtest.engine._precompute_factors") as mp, \

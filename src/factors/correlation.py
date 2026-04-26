@@ -125,14 +125,11 @@ def compute_blended_correlation_all_assets(
         compute_correlation_all_assets(data_dict, tickers, lb)
         for lb in lookbacks
     ]
-    # Stack on a new axis and take the mean — skipna=False so the blend is
-    # NaN until every component window has exited warm-up (same convention
-    # as compute_trend_ensemble).
+    # Stack on a new axis and compute the mean only where all windows are valid —
+    # matching the compute_trend_ensemble convention of not computing on a partial ensemble.
     stacked = np.stack([f.values for f in frames], axis=0)
-    blended_values = np.nanmean(stacked, axis=0)   # use nanmean: allow partial warm-up
-    # But actually use skipna=False equivalent: only valid when ALL windows valid
     all_valid = np.all(~np.isnan(stacked), axis=0)
-    blended_values[~all_valid] = np.nan
+    blended_values = np.where(all_valid, np.nanmean(stacked, axis=0), np.nan)
     result = pd.DataFrame(blended_values, index=frames[0].index, columns=frames[0].columns)
     return result
 
