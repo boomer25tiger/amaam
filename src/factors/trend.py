@@ -488,10 +488,6 @@ def compute_trend_all_assets(
     """
     method = config.trend_method
 
-    # OHLC methods require High and Low; close-only methods only need Close.
-    # The dispatch is separated to avoid KeyError on DataFrames that lack H/L.
-    _ohlc_methods = {"keltner", "paper_atr", "ensemble"}
-
     def _signal_for(ticker: str, df: pd.DataFrame) -> pd.Series:
         close = df["Close"]
 
@@ -510,8 +506,6 @@ def compute_trend_all_assets(
         if method == "sma_ratio":
             return compute_sma_ratio_signal(close)
         if method == "sma_carry":
-            # config is the ModelConfig instance passed to this function.
-            # trend_sma_period is not a config field; default to 200 unconditionally.
             return compute_sma_carry_signal(close, period=200)
         if method == "dual_sma":
             return compute_dual_sma_signal(close)

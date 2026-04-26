@@ -10,7 +10,7 @@ hedging sleeve. See Section 9.10 of the specification.
 """
 
 import logging
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pandas as pd
 
@@ -130,7 +130,12 @@ def compute_trank(
     return trank
 
 
-def select_top_n(tranks: pd.Series, n: int) -> List[str]:
+def select_top_n(
+    tranks: pd.Series,
+    n: int,
+    prev_selected: Optional[List[str]] = None,
+    exit_buffer: int = 0,
+) -> List[str]:
     """
     Return the tickers of the top-N assets by TRank score.
 
@@ -140,12 +145,26 @@ def select_top_n(tranks: pd.Series, n: int) -> List[str]:
 
     Assets with NaN TRank are excluded before selection.
 
+    When *prev_selected* and *exit_buffer* > 0 are provided, selection hysteresis
+    is applied: incumbents are retained until they fall outside the top-(n +
+    exit_buffer) zone, rather than being dropped the moment they slip out of
+    the top-N.  New entrants still require a top-N ranking.  This asymmetric
+    rule reduces noise trading at the selection boundary without lowering entry
+    quality.  Reference: DeMiguel et al. (2009); Novy-Marx & Velikov (2016).
+
     Parameters
     ----------
     tranks : pd.Series
         TRank scores indexed by ticker.
     n : int
         Target number of assets to select (e.g. 6 for main sleeve).
+    prev_selected : List[str] or None
+        Tickers selected in the previous period.  When provided together with
+        ``exit_buffer > 0``, incumbents persist until ranked > n + exit_buffer.
+        Pass ``None`` (default) or ``[]`` to use standard top-N with no memory.
+    exit_buffer : int
+        Extra ranks an incumbent may slip before being forced out.  0 = current
+        behaviour (immediate exit). Typical useful range: 1–2.
 
     Returns
     -------
@@ -169,11 +188,31 @@ def select_top_n(tranks: pd.Series, n: int) -> List[str]:
         # Fewer assets than requested — return all.
         return sorted_tranks.index.tolist()
 
-    # The cut-off score is the N-th highest value.  Include all assets that
-    # tie at or above that score (Keller tie-inclusion convention).
-    cutoff_score = sorted_tranks.iloc[n - 1]
-    selected = sorted_tranks[sorted_tranks >= cutoff_score]
-    return selected.index.tolist()
+    # Entry threshold: the N-th highest TRank score.  Include all ties at or
+    # above this value (Keller tie-inclusion convention).
+    cutoff_entry = sorted_tranks.iloc[n - 1]
+    new_entries: set = set(sorted_tranks[sorted_tranks >= cutoff_entry].index)
+
+    if not prev_selected or exit_buffer == 0:
+        # Standard path: no hysteresis — return new entrants only.
+        return sorted_tranks[sorted_tranks >= cutoff_entry].index.tolist()
+
+    # Hysteresis path: incumbents are retained until they fall outside the
+    # wider top-(n + exit_buffer) zone.  The exit cutoff is the score of the
+    # (n + exit_buffer)-th best asset; NaN incumbents are always dropped.
+    exit_n = n + exit_buffer
+    if exit_n >= len(sorted_tranks):
+        # Every available asset is within the exit zone; retain all incumbents.
+        retained: set = {t for t in prev_selected if t in valid.index}
+    else:
+        cutoff_exit = sorted_tranks.iloc[exit_n - 1]
+        retained = {
+            t for t in prev_selected
+            if t in valid.index and valid[t] >= cutoff_exit
+        }
+
+    combined = new_entries | retained
+    return sorted_tranks[sorted_tranks.index.isin(combined)].index.tolist()
 
 
 def compute_monthly_rankings(

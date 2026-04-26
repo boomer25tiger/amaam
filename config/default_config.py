@@ -182,8 +182,8 @@ class ModelConfig:
 
     # 5 bps one-way reflects current ETF bid-ask spreads for liquid large-cap
     # ETFs (XLK, XLF, SPY etc. trade at 1-2 bps; less liquid names like EEM,
-    # RWR at 3-5 bps).  Previous 10 bps round-trip was conservative; 5 bps
-    # one-way is consistent with retail/small-institutional execution today.
+    # RWR at 3-5 bps).  Applied per trade leg: selling a position costs 5 bps,
+    # buying a position costs 5 bps.  A complete swap costs 10 bps total.
     transaction_cost: float = 0.0005
 
     # -------------------------------------------------------------------------
@@ -228,3 +228,40 @@ class ModelConfig:
     # variance sums cleanly over short windows); shorter windows capture
     # recent volatility clustering, longer windows provide stability.
     vol_blend_lookbacks: List[int] = field(default_factory=lambda: [21, 63, 126, 252])
+
+    # -------------------------------------------------------------------------
+    # Portfolio-level volatility targeting (Barroso & Santa-Clara 2015)
+    # -------------------------------------------------------------------------
+
+    # When True, monthly allocations are scaled so realized portfolio vol ≈
+    # vol_target. Residual weight goes to SHY; scale is capped at
+    # vol_target_max_leverage. Disabled by default so the canonical backtest
+    # is unaffected.
+    vol_targeting: bool = False
+
+    # Annualised volatility target (decimal). 0.10 = 10% — typical for
+    # risk-parity multi-asset portfolios.
+    vol_target: float = 0.10
+
+    # Rolling window (trading days) used to estimate realized portfolio vol
+    # before scaling. 21 days (≈1 month) is responsive to regime shifts;
+    # 63 days is more stable but slower to react to vol spikes.
+    vol_target_lookback: int = 21
+
+    # Maximum portfolio scale factor. 1.0 = no leverage (scale only down,
+    # never up). 1.5 = allow up to 50% leverage in low-vol regimes.
+    vol_target_max_leverage: float = 1.0
+
+    # -------------------------------------------------------------------------
+    # Selection hysteresis (turnover reduction)
+    # -------------------------------------------------------------------------
+
+    # Number of extra ranks an incumbent asset may slip before being forced out.
+    # 0 = standard immediate exit (current production behaviour): an asset exits
+    #     the portfolio as soon as it falls outside the top-N by TRank.
+    # k > 0: incumbent is retained until it falls outside top-(N + k).
+    #        Entry still requires a top-N rank; only exit is relaxed.
+    # This asymmetric rule reduces noise trading from small TRank fluctuations at
+    # the selection boundary without biasing entry in favor of lower-quality assets.
+    # Typical useful range: 1–2. Values > 3 begin to resemble a full buy-and-hold.
+    selection_exit_buffer: int = 0

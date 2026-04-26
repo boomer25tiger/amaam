@@ -69,9 +69,10 @@ def compute_all_metrics(
         Per-period portfolio turnover values (sum of absolute weight changes).
         If provided, average and annual turnover metrics are included.
     periods_per_year : float, optional
-        Number of return periods per calendar year.  When ``None`` (default),
-        inferred from the date span of *returns*: ``len(returns) / years``.
-        Pass ``12`` explicitly to reproduce the original monthly-only behaviour.
+        Number of return periods per calendar year.  Defaults to 12 (monthly)
+        when not supplied.  Pass the correct value explicitly for non-monthly
+        frequencies (e.g. ~25 for bi-weekly); the backtest engine computes and
+        passes this from the realised return span.
 
     Returns
     -------
@@ -84,12 +85,8 @@ def compute_all_metrics(
 
     n_periods = len(returns)
 
-    # Infer periods_per_year from the actual date span when not provided.
-    # This ensures correct annualisation for monthly, bi-weekly, or any other
-    # rebalancing frequency without requiring the caller to know the factor.
-    # Default to 12 (monthly) when no frequency hint is provided.
-    # Callers with non-monthly data (e.g. biweekly) must supply the correct
-    # value so that Sharpe and annualised return are properly scaled.
+    # Default to 12 (monthly). Non-monthly callers must supply the correct
+    # value; the backtest engine computes it from the realised return span.
     if periods_per_year is None:
         periods_per_year = float(_MONTHS_PER_YEAR)
 
