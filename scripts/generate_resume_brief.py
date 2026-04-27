@@ -195,18 +195,81 @@ def compute_all(data_dir="data/processed"):
         canonical_weights="wM=0.65 / wV=0.25 / wC=0.10",
     )
 
-    # Statistical significance (hardcoded from definitive_master_report run)
+    # SPY stats aligned to the same date range as AMAAM (not the full 2004 history)
+    # so Sharpe and drawdown comparisons are on an identical time window.
+    amaam_start = amaam.index.min().strftime("%Y-%m-%d")
+    spy_aligned = _slice(spy, amaam_start, E)
+    spy_aligned_stats = _full_stats(spy_aligned)
+
+    # Statistical significance — computed fresh from the current backtest.
+    from scipy import stats as scipy_stats
+    import math
+
+    def _ttest_one_tailed(r: pd.Series) -> dict:
+        """One-tailed t-test H0: mean monthly return = 0."""
+        r_ = r.dropna()
+        t, p2 = scipy_stats.ttest_1samp(r_, 0)
+        return dict(t=float(t), p=float(p2 / 2), n=len(r_))  # p is one-tailed
+
+    def _bootstrap_sharpe(r: pd.Series, n_boot: int = 5_000, seed: int = 42
+                          ) -> dict:
+        """Bootstrap percentile CI for annualised Sharpe ratio."""
+        rng = np.random.default_rng(seed)
+        vals = r.values
+        srs = []
+        for _ in range(n_boot):
+            s = rng.choice(vals, size=len(vals), replace=True)
+            ar = (1 + s).prod() ** (12 / len(s)) - 1
+            av = s.std() * math.sqrt(12)
+            if av > 0:
+                srs.append((ar - RF_ANN) / av)
+        srs = np.array(srs)
+        return dict(
+            ci95=(float(np.percentile(srs, 2.5)), float(np.percentile(srs, 97.5))),
+            ci99=(float(np.percentile(srs, 0.5)), float(np.percentile(srs, 99.5))),
+            p_gt0=float((srs > 0).mean()),
+        )
+
+    def _sign_flip_permutation(r: pd.Series, n_perm: int = 5_000, seed: int = 42
+                               ) -> dict:
+        """Sign-flip permutation test for the Sharpe ratio.
+
+        Each permutation multiplies each return by ±1 at random, breaking any
+        temporal structure while keeping the marginal distribution intact.
+        The p-value is the fraction of permuted Sharpes >= the observed Sharpe.
+        """
+        rng = np.random.default_rng(seed)
+        vals = r.values
+        obs_ar = (1 + vals).prod() ** (12 / len(vals)) - 1
+        obs_av = vals.std() * math.sqrt(12)
+        obs_sr = (obs_ar - RF_ANN) / obs_av if obs_av > 0 else float("nan")
+        perm_srs = []
+        for _ in range(n_perm):
+            flipped = vals * rng.choice([-1.0, 1.0], size=len(vals))
+            av = flipped.std() * math.sqrt(12)
+            if av > 0:
+                ar = (1 + flipped).prod() ** (12 / len(flipped)) - 1
+                perm_srs.append((ar - RF_ANN) / av)
+        perm_srs = np.array(perm_srs)
+        p_val = float((perm_srs >= obs_sr).mean())
+        z = float((obs_sr - perm_srs.mean()) / perm_srs.std()) if perm_srs.std() > 0 else float("nan")
+        return dict(obs_sr=obs_sr, z=z, p=p_val)
+
+    print("  Computing statistical significance…")
+    r_full = _slice(amaam, S, E).dropna()
+    boot   = _bootstrap_sharpe(r_full)
+    perm   = _sign_flip_permutation(r_full)
+
     sig = dict(
-        ttest_full=dict(t=3.951, p=0.0001),
-        ttest_is=dict(t=2.925, p=0.0020),
-        ttest_oos=dict(t=1.974, p=0.0261),
-        ttest_hold=dict(t=1.934, p=0.0318),
-        permutation_z=3.98, permutation_p=0.0000,
-        bootstrap_95_full=(0.283, 1.110),
-        bootstrap_99_full=(0.162, 1.257),
-        p_sr_gt_0=1.000,
-        ols_single_factor=dict(alpha=0.1131, beta=-0.003, r2=0.000,
-                                t=3.86, p=0.0001, note="MISSPECIFIED vs SPY only"),
+        ttest_full=_ttest_one_tailed(_slice(amaam, S, E)),
+        ttest_is=_ttest_one_tailed(_slice(amaam, S, IS_E)),
+        ttest_oos=_ttest_one_tailed(_slice(amaam, IS_E, OOS_E)),
+        ttest_hold=_ttest_one_tailed(_slice(amaam, OOS_E, E)),
+        permutation_z=perm["z"],
+        permutation_p=perm["p"],
+        bootstrap_95_full=boot["ci95"],
+        bootstrap_99_full=boot["ci99"],
+        p_sr_gt_0=boot["p_gt0"],
     )
 
     # Experiments tested and rejected
@@ -252,6 +315,7 @@ def compute_all(data_dir="data/processed"):
     return dict(
         amaam=amaam, annual=annual,
         spy=spy,                                  # raw SPY series for annual table
+        spy_aligned_stats=spy_aligned_stats,      # SPY stats on AMAAM's date range
         period_stats=period_stats,
         spy_stats=spy_stats, b60_stats=b60_stats,
         b7t_stats=b7t_stats, b1n_stats=b1n_stats,
@@ -451,7 +515,8 @@ def build_pdf(d: dict, out_path: str) -> None:
     wds = [74, 28, 28, 28, 28]
     thead(["Metric", "AMAAM", "SPY", "60/40", "1/N"], wds)
 
-    sp = d["spy_stats"]; b6 = d["b60_stats"]; b1 = d["b1n_stats"]
+    # Use SPY aligned to AMAAM's start date so all columns cover the same period.
+    sp = d["spy_aligned_stats"]; b6 = d["b60_stats"]; b1 = d["b1n_stats"]
     sf = s["Full (2004–2026)"]
 
     def pct(x): return f"{x*100:+.2f}%" if not np.isnan(x) else "N/A"
@@ -482,8 +547,12 @@ def build_pdf(d: dict, out_path: str) -> None:
         trow([lbl, st["n"], pct(st["ret"]), pct(st["vol"]),
               rat(st["sr"]), pct(st["mdd"]), rat(st["calmar"])], wds2, True)
 
+    sr_is   = s["IS   (2004–2018)"]["sr"]
+    sr_oos  = s["OOS  (2018–2024)"]["sr"]
+    sr_hold = s["Hold (2024–2026)"]["sr"]
     note(
-        "Key result: Sharpe does NOT degrade IS → OOS → Holdout (0.667 → 0.656 → 1.084). "
+        f"Key result: Sharpe does NOT degrade IS -> OOS -> Holdout "
+        f"({sr_is:.3f} -> {sr_oos:.3f} -> {sr_hold:.3f}). "
         "This is evidence against overfitting. Holdout was run once, after all design "
         "decisions were finalised, and results were never used to adjust parameters."
     )
@@ -666,31 +735,72 @@ def build_pdf(d: dict, out_path: str) -> None:
         pdf.ln(6)
         pdf.set_text_color(0, 0, 0)
 
+    # ── Pull live values for the guidance section ─────────────────────────────
+    _sf   = d["period_stats"]["Full (2004–2026)"]
+    _sa   = d["spy_aligned_stats"]   # SPY on same window as AMAAM
+    _si   = d["sig"]
+    _wf   = d["wf_summary"]
+    _bi   = d["bench_irs"]["Full (2004–2026)"]
+    _mf   = d["mf_alpha"]["Full (2004–2026)"]
+    _mf_o = d["mf_alpha"]["OOS  (2018–2024)"]
+    _mf_h = d["mf_alpha"]["Hold (2024–2026)"]
+    _s_is   = d["period_stats"]["IS   (2004–2018)"]["sr"]
+    _s_oos  = d["period_stats"]["OOS  (2018–2024)"]["sr"]
+    _s_hold = d["period_stats"]["Hold (2024–2026)"]["sr"]
+
+    _ir_1n  = _bi.get("1/N 22-ETF", {}).get("ir", float("nan"))
+    _exc_1n = _bi.get("1/N 22-ETF", {}).get("exc", float("nan"))
+    _ir_60  = _bi.get("60/40", {}).get("ir", float("nan"))
+
+    _mdd_pp = (_sf["mdd"] - _sa["mdd"]) * 100   # drawdown improvement in pp
+
+    _perm_p_str = (f"p < 0.0001" if _si["permutation_p"] < 0.0001
+                   else f"p = {_si['permutation_p']:.4f}")
+    _mf_stars = ("***" if _mf["p_alpha"] < 0.01 else
+                 "**"  if _mf["p_alpha"] < 0.05 else
+                 "*"   if _mf["p_alpha"] < 0.10 else "ns")
+    _mf_o_stars = ("***" if _mf_o["p_alpha"] < 0.01 else
+                   "**"  if _mf_o["p_alpha"] < 0.05 else
+                   "*"   if _mf_o["p_alpha"] < 0.10 else "ns")
+    _b_spy_betas = _mf_h.get("betas", {})
+
     title("8. Resume Guidance for AI Assistant")
     body(
-        "This document contains all verified numerical results for the AMAAM project. "
-        "When writing resume bullet points, use the following hierarchy of claims:\n\n"
-        "TIER 1 — Most defensible (use freely):\n"
-        "  • Sharpe 0.71 vs SPY 0.63 over same period\n"
-        "  • Max drawdown -18.7% vs SPY -50.8%  (32pp improvement)\n"
-        "  • Matches SPY gross return (+10.4% vs +10.7%) through different exposure\n"
-        "  • IR = +0.20 vs 1/N equal-weight across same 22-ETF universe (full and OOS)\n"
-        "  • +2.65%/yr active return vs 1/N passive baseline\n"
-        "  • Sharpe non-degrading IS→OOS→Holdout: 0.667 → 0.656 → 1.084\n"
-        "  • Permutation Z = 3.98, p < 0.0001 (return not attributable to chance)\n\n"
-        "TIER 2 — Use with context:\n"
-        "  • Multi-factor α = +7.3%/yr (t=2.54, **) — significant full-period but not OOS\n"
-        "  • Walk-forward: canonical weights win 5/6 OOS folds (stacked OOS SR 0.719)\n"
-        "  • Holdout α = -10.5%/yr — driven by factor tilts in a strong bull market,\n"
-        "    not model failure; R² jumped to 0.79 in 2024–2026\n\n"
+        "This document contains all verified numerical results for the AMAAM project.\n"
+        "All numbers below are computed fresh from the current backtest.\n"
+        "Use the following hierarchy when writing resume bullet points:\n\n"
+
+        f"TIER 1 -- Most defensible (use freely):\n"
+        f"  * Sharpe {_sf['sr']:.2f} vs SPY {_sa['sr']:.2f} on identical date range\n"
+        f"  * Max drawdown {_sf['mdd']*100:.1f}% vs SPY {_sa['mdd']*100:.1f}%"
+        f"  ({abs(_mdd_pp):.0f}pp improvement)\n"
+        f"  * Matches SPY return ({_sf['ret']*100:.1f}% vs {_sa['ret']*100:.1f}%/yr)"
+        f" with {(_sa['vol']-_sf['vol'])*100:.1f}pp lower volatility\n"
+        f"  * IR = {_ir_1n:+.2f} vs 1/N equal-weight across same 22-ETF universe (full period)\n"
+        f"  * Active return vs 1/N: {_exc_1n*100:+.2f}%/yr\n"
+        f"  * Sharpe non-degrading IS->OOS->Holdout: "
+        f"{_s_is:.3f} -> {_s_oos:.3f} -> {_s_hold:.3f}\n"
+        f"  * Sign-flip permutation SR test: Z = {_si['permutation_z']:.2f}, {_perm_p_str}\n\n"
+
+        f"TIER 2 -- Use with context:\n"
+        f"  * Multi-factor alpha = {_mf['alpha']*100:+.1f}%/yr "
+        f"(t={_mf['t_alpha']:+.2f}, {_mf_stars}) -- full-period significant\n"
+        f"  * OOS multi-factor alpha = {_mf_o['alpha']*100:+.1f}%/yr ({_mf_o_stars})\n"
+        f"  * Walk-forward: canonical weights win {_wf['canonical_wins']}/{_wf['n_folds']} OOS folds"
+        f" (stacked OOS SR {_wf['stacked_oos_sr_canonical']:.3f})\n"
+        f"  * Bootstrap 95% Sharpe CI: [{_si['bootstrap_95_full'][0]:.3f}, "
+        f"{_si['bootstrap_95_full'][1]:.3f}]\n\n"
+
         "AVOID:\n"
-        "  • 'Alpha of +11.3%/yr' — this is the misspecified single-factor OLS result\n"
-        "  • 'Beta ≈ 0 to SPY' — multi-factor β_SPY is actually +0.25; CAPM beta was\n"
-        "    masking other factor correlations\n"
-        "  • Any Sharpe figure > 0.75 without specifying the period (holdout is 1.08\n"
-        "    but covers only 28 months)\n\n"
-        "The model's value proposition is risk-adjusted return (Sharpe, drawdown) over "
-        "passive multi-asset benchmarks, not raw alpha generation above SPY."
+        "  * Single-factor OLS alpha (~11%/yr) -- misspecified; beta~0 collapses intercept\n"
+        "    to mean return; multi-factor regression is the correct specification\n"
+        f"  * Holdout alpha ({_mf_h['alpha']*100:+.1f}%/yr) without context -- in 2024-2026\n"
+        "    both equities and bonds rallied; factor tilts drove returns, not skill\n"
+        "  * Any Sharpe > 0.75 without specifying the period (holdout is elevated\n"
+        f"    at {_s_hold:.2f} but covers only {d['period_stats']['Hold (2024–2026)']['n']} months)\n\n"
+
+        "The model's edge is risk-adjusted return (Sharpe, drawdown control) relative to\n"
+        "passive multi-asset benchmarks, not raw equity-market alpha generation."
     )
 
     pdf.output(out_path)
