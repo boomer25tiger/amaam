@@ -197,7 +197,7 @@ class ModelConfig:
     backtest_start: str = "2004-01-01"
 
     # Present date at time of implementation (Section 5.1).
-    backtest_end: str = "2026-04-10"
+    backtest_end: str = "2026-03-31"
 
     # All design decisions must be finalised using only data before this date;
     # the holdout period is run exactly once at the end (Section 5.2).
