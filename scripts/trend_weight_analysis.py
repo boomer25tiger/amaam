@@ -40,14 +40,14 @@ DATA_DIR = ROOT / "data" / "processed"
 IS_START  = "2004-01-01"
 IS_END    = "2017-12-31"
 OOS_START = "2018-01-01"
-OOS_END   = "2026-04-10"
+OOS_END   = ModelConfig().backtest_end
 
 STRESS_PERIODS = {
     "GFC":           ("2007-10-01", "2009-03-31"),
     "China Selloff": ("2015-08-01", "2016-02-29"),
     "COVID":         ("2020-02-01", "2020-03-31"),
     "2022 Rates":    ("2022-01-01", "2022-12-31"),
-    "2025 Tariffs":  ("2025-02-01", "2026-04-10"),
+    "2025 Tariffs":  ("2025-02-01", ModelConfig().backtest_end),
 }
 
 

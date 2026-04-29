@@ -52,11 +52,12 @@ logging.basicConfig(level=logging.WARNING,
 
 RF = 0.02 / 12   # monthly risk-free rate
 
-WINDOWS = [
-    ("Full    (2004–2026)", "2004-01-01", "2026-04-10"),
+# End date is read from cfg.backtest_end inside main(); these are filled at runtime.
+WINDOWS_TEMPLATE = [
+    ("Full    (2004–2026)", "2004-01-01", None),
     ("IS      (2004–2018)", "2004-01-01", "2018-01-01"),
     ("OOS     (2018–2024)", "2018-01-01", "2024-01-01"),
-    ("Holdout (2024–2026)", "2024-01-01", "2026-04-10"),
+    ("Holdout (2024–2026)", "2024-01-01", None),
 ]
 
 
@@ -130,6 +131,10 @@ def main() -> None:
 
     start_full = cfg.backtest_start
     end_full   = cfg.backtest_end
+
+    # Resolve WINDOWS_TEMPLATE using live config end date.
+    WINDOWS = [(lbl, ws, we if we is not None else end_full)
+               for lbl, ws, we in WINDOWS_TEMPLATE]
 
     # ── Factor returns (monthly, from close prices) ───────────────────────────
     # Use the same one-day execution lag as AMAAM so dates align.
@@ -265,7 +270,7 @@ def main() -> None:
     print("SECTION 4 — SUMMARY: AMAAM vs ALL BENCHMARKS (full period)")
     print("=" * 76)
 
-    ws, we = "2004-01-01", "2026-04-10"
+    ws, we = start_full, end_full
     a = _slice(amaam, ws, we)
 
     all_benches = {

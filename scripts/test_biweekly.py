@@ -181,7 +181,7 @@ print(f"  B: {len(rb)} return periods  ({rb.index.min().date()} → {rb.index.ma
 IS_START  = "2004-01-01"
 IS_END    = "2017-12-31"
 OOS_START = "2018-01-01"
-OOS_END   = "2026-04-10"
+OOS_END   = ModelConfig().backtest_end
 
 ra_is  = ra.loc[IS_START:IS_END]
 ra_oos = ra.loc[OOS_START:OOS_END]
@@ -289,7 +289,7 @@ stress_periods = [
     ("China Selloff",     "2015-08-01", "2016-02-29"),
     ("COVID",             "2020-02-01", "2020-03-31"),
     ("2022 Rate Shock",   "2022-01-01", "2022-12-31"),
-    ("2025 Tariff Shock", "2025-02-01", "2026-04-10"),
+    ("2025 Tariff Shock", "2025-02-01", ModelConfig().backtest_end),
 ]
 
 print()

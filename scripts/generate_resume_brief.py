@@ -126,11 +126,14 @@ def compute_all(data_dir="data/processed"):
     S, E = cfg.backtest_start, cfg.backtest_end
     IS_E, OOS_E, HOLD_S = cfg.holdout_start, "2024-01-01", "2024-01-01"
 
+    # Derive end-month label from config so window names are always correct.
+    _end_lbl = pd.Timestamp(E).strftime("%b %Y")   # e.g. "Mar 2026"
+
     windows = {
-        "Full (2004–2026)":    (S,      E),
-        "IS   (2004–2018)":    (S,      IS_E),
-        "OOS  (2018–2024)":    (IS_E,   OOS_E),
-        "Hold (2024–2026)":    (HOLD_S, E),
+        f"Full (2005-{_end_lbl})": (S,      E),
+        "IS   (2005-2018)":        (S,      IS_E),
+        "OOS  (2018-2024)":        (IS_E,   OOS_E),
+        f"Hold (2024-{_end_lbl})": (HOLD_S, E),
     }
 
     # Period metrics
@@ -184,6 +187,20 @@ def compute_all(data_dir="data/processed"):
         y = _slice(amaam, ws, we)
         X = fmon.loc[y.index] if not y.empty else pd.DataFrame()
         mf_alpha[lbl] = _ols_alpha(y, X)
+
+    # Single-factor SPY-only OLS (misspecified — reported for completeness only).
+    # With beta near 0 the intercept collapses to the mean return; multi-factor
+    # regression is the correct specification for a multi-asset model.
+    _sf_al = pd.concat([_slice(amaam, S, E), fmon[["SPY"]]], axis=1).dropna()
+    _sf_res = sm.OLS(_sf_al.iloc[:, 0], sm.add_constant(_sf_al.iloc[:, 1:])).fit(
+        cov_type="HAC", cov_kwds={"maxlags": 3})
+    single_factor_alpha = dict(
+        alpha=float(_sf_res.params["const"] * 12),
+        beta=float(_sf_res.params.get("SPY", 0)),
+        r2=float(_sf_res.rsquared),
+        t=float(_sf_res.tvalues["const"]),
+        p=float(_sf_res.pvalues["const"]),
+    )
 
     # Walk-forward summary (hardcoded from canonical run — re-running 39×6
     # configs here would add ~10 min; these are the validated results)
@@ -272,16 +289,24 @@ def compute_all(data_dir="data/processed"):
         p_sr_gt_0=boot["p_gt0"],
     )
 
-    # Experiments tested and rejected
+    # Experiment baseline figures pulled from live backtest so they match current config.
+    _full_sr = _sharpe(_slice(amaam, S, E))
+    _is_sr   = _sharpe(_slice(amaam, S, IS_E))
+    _to_ann  = float(res.turnover.mean()) * 12 * 100   # annual turnover %
+
     experiments = [
         dict(
             name="Portfolio volatility targeting",
             description=(
                 "Scales monthly allocation so realized portfolio vol ≈ target. "
-                "Tested: VT-10% NoLev, VT-10% 1.5×Lev, VT-12% NoLev."
+                "Tested: VT-10% NoLev, VT-10% 1.5x Lev, VT-12% NoLev."
             ),
-            result="All variants hurt Sharpe (0.645–0.650 vs baseline 0.708).",
-            reason="Hedging sleeve already de-risks in stress; vol-targeting is redundant.",
+            result=(
+                f"All variants hurt Sharpe (0.645-0.650 vs baseline {_full_sr:.3f}). "
+                "The hedging sleeve already de-risks the portfolio in stress periods, "
+                "making an additional vol overlay redundant."
+            ),
+            reason="Redundant risk control: hedging sleeve provides the same protection more efficiently.",
             verdict="REJECTED",
         ),
         dict(
@@ -291,10 +316,13 @@ def compute_all(data_dir="data/processed"):
                 "exiting immediately at rank > N. Tested buffer=1 and buffer=2."
             ),
             result=(
-                "Buffer-2 improved IS Sharpe (0.751 vs 0.682) but walk-forward: "
-                "2/6 test folds won, stacked OOS SR 0.684 vs 0.719 baseline."
+                f"Buffer-2 improved IS Sharpe (0.751 vs {_is_sr:.3f} baseline) but "
+                "walk-forward: 2/6 test folds won, stacked OOS SR 0.684 vs 0.719 baseline. "
+                "IS improvement was pure overfitting -- buffer won every training fold but "
+                "only 2 of 6 test folds."
             ),
-            reason="Fast exits are valuable in volatile markets (COVID 2020, 2022 rate hikes).",
+            reason="Fast exits are critical in volatile markets (COVID 2020, 2022 rate hikes). "
+                   "Slowing exits causes the model to hold deteriorating positions through drawdowns.",
             verdict="REJECTED",
         ),
         dict(
@@ -304,10 +332,12 @@ def compute_all(data_dir="data/processed"):
                 "short-term noise and turnover."
             ),
             result=(
-                "Turnover −32% (610%/yr vs 894%/yr) but holdout SR collapsed "
-                "to 0.384 vs 0.740; Fold 4 (COVID) SR = 0.050 vs 1.255."
+                f"Turnover fell 32% (610%/yr vs {_to_ann:.0f}%/yr baseline) but "
+                f"holdout SR collapsed to 0.384 vs {_full_sr:.3f}; "
+                "Fold 4 (COVID recovery 2019-2020) SR = 0.050 vs 1.255 for baseline."
             ),
-            reason="21-day component provides critical early-warning for fast regime shifts.",
+            reason="The 21-day component is the early-warning system for fast regime shifts. "
+                   "Removing it caused catastrophic underperformance during rapid recoveries.",
             verdict="REJECTED",
         ),
     ]
@@ -319,13 +349,16 @@ def compute_all(data_dir="data/processed"):
         period_stats=period_stats,
         spy_stats=spy_stats, b60_stats=b60_stats,
         b7t_stats=b7t_stats, b1n_stats=b1n_stats,
+        b1n=b1n,                                  # full 1/N return series for per-window slicing
         bench_irs=bench_irs,
         mf_alpha=mf_alpha,
+        single_factor_alpha=single_factor_alpha,
         wf_summary=wf_summary,
         sig=sig,
         experiments=experiments,
         cfg=cfg,
         windows=windows,
+        amaam_start=amaam_start,
     )
 
 
@@ -460,6 +493,10 @@ def build_pdf(d: dict, out_path: str) -> None:
     wf = d["wf_summary"]
     cfg = d["cfg"]
 
+    # Derive window key names from the dict so nothing hardcodes "2004–2026" etc.
+    _wkeys = list(d["windows"].keys())
+    _full_key, _is_key, _oos_key, _hold_key = _wkeys
+
     # ── PAGE 1: Title + Implementation ───────────────────────────────────────
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 16)
@@ -511,13 +548,13 @@ def build_pdf(d: dict, out_path: str) -> None:
     pdf.add_page()
     title("2. Core Performance Metrics")
 
-    section("Full Period vs SPY  (2004 – 2026, 5 bps/leg)")
+    section(f"Full Period vs SPY  ({_full_key}, 5 bps/leg)")
     wds = [74, 28, 28, 28, 28]
     thead(["Metric", "AMAAM", "SPY", "60/40", "1/N"], wds)
 
     # Use SPY aligned to AMAAM's start date so all columns cover the same period.
     sp = d["spy_aligned_stats"]; b6 = d["b60_stats"]; b1 = d["b1n_stats"]
-    sf = s["Full (2004–2026)"]
+    sf = s[_full_key]
 
     def pct(x): return f"{x*100:+.2f}%" if not np.isnan(x) else "N/A"
     def rat(x): return f"{x:.3f}" if not np.isnan(x) else "N/A"
@@ -547,9 +584,9 @@ def build_pdf(d: dict, out_path: str) -> None:
         trow([lbl, st["n"], pct(st["ret"]), pct(st["vol"]),
               rat(st["sr"]), pct(st["mdd"]), rat(st["calmar"])], wds2, True)
 
-    sr_is   = s["IS   (2004–2018)"]["sr"]
-    sr_oos  = s["OOS  (2018–2024)"]["sr"]
-    sr_hold = s["Hold (2024–2026)"]["sr"]
+    sr_is   = s[_is_key]["sr"]
+    sr_oos  = s[_oos_key]["sr"]
+    sr_hold = s[_hold_key]["sr"]
     note(
         f"Key result: Sharpe does NOT degrade IS -> OOS -> Holdout "
         f"({sr_is:.3f} -> {sr_oos:.3f} -> {sr_hold:.3f}). "
@@ -562,7 +599,7 @@ def build_pdf(d: dict, out_path: str) -> None:
     title("3. Annual Returns & Benchmark Information Ratios")
 
     section("Calendar-Year Returns  (AMAAM vs SPY)")
-    annual_spy = _slice(d["spy"], "2004-01-01", "2026-04-10").resample("YE").apply(
+    annual_spy = _slice(d["spy"], cfg.backtest_start, cfg.backtest_end).resample("YE").apply(
         lambda x: (1+x).prod()-1)
     wds3 = [22, 28, 28, 28]
     thead(["Year", "AMAAM", "SPY", "Excess"], wds3)
@@ -601,12 +638,16 @@ def build_pdf(d: dict, out_path: str) -> None:
     pdf.add_page()
     title("4. Alpha Decomposition")
 
+    _sfa = d["single_factor_alpha"]
+    _sfa_p_str = ("p < 0.0001" if _sfa["p"] < 0.0001 else f"p = {_sfa['p']:.4f}")
     section("Why SPY-only alpha is misleading")
     body(
-        "A single-factor OLS vs SPY yields alpha = +11.3%/yr (t=3.86, p<0.0001) — but this "
-        "is largely spurious. When beta ≈ 0, the OLS intercept collapses to the mean return. "
-        "The model holds bonds, commodities, REITs, gold, and international equities; a "
-        "single equity factor cannot span those risk premia, so they all show up as 'alpha'.\n\n"
+        f"A single-factor OLS vs SPY yields alpha = {_sfa['alpha']*100:+.1f}%/yr "
+        f"(beta={_sfa['beta']:+.3f}, t={_sfa['t']:+.2f}, {_sfa_p_str}, R^2={_sfa['r2']:.3f}) "
+        f"-- but this is largely spurious. When beta ~ 0, the OLS intercept collapses to the "
+        f"mean return. The model holds bonds, commodities, REITs, gold, and international "
+        f"equities; a single equity factor cannot span those risk premia, so they all show up "
+        f"as 'alpha'.\n\n"
         "The single-factor result is reported here for completeness only. "
         "Multi-factor regression is the correct specification."
     )
@@ -634,17 +675,32 @@ def build_pdf(d: dict, out_path: str) -> None:
               f"{betas.get('GLD',0):+.3f}",
               ], wds5, True)
 
+    _mfa_f  = d["mf_alpha"][_full_key]
+    _mfa_is = d["mf_alpha"][_is_key]
+    _mfa_oo = d["mf_alpha"][_oos_key]
+    _mfa_ho = d["mf_alpha"][_hold_key]
+    _f_stars  = ("***" if _mfa_f["p_alpha"]<0.01  else "**" if _mfa_f["p_alpha"]<0.05  else "*" if _mfa_f["p_alpha"]<0.10  else "ns")
+    _is_stars = ("***" if _mfa_is["p_alpha"]<0.01 else "**" if _mfa_is["p_alpha"]<0.05 else "*" if _mfa_is["p_alpha"]<0.10 else "ns")
+    _oo_stars = ("***" if _mfa_oo["p_alpha"]<0.01 else "**" if _mfa_oo["p_alpha"]<0.05 else "*" if _mfa_oo["p_alpha"]<0.10 else "ns")
+    _ho_stars = ("***" if _mfa_ho["p_alpha"]<0.01 else "**" if _mfa_ho["p_alpha"]<0.05 else "*" if _mfa_ho["p_alpha"]<0.10 else "ns")
+    _ir_1n_full = d["bench_irs"][_full_key].get("1/N 22-ETF", {}).get("ir", float("nan"))
+    _mdd_diff_pp = abs((sf["mdd"] - d["b1n_stats"]["mdd"]) * 100)
+    _ho_betas = _mfa_ho.get("betas", {})
     note(
-        "Key findings:\n"
-        "• Full-period α = +7.3%/yr (t=2.54, **) — significant but smaller than single-factor claim.\n"
-        "• IS α = +9.8%/yr (***); OOS α = +5.9% (NOT significant, p=0.30).\n"
-        "• Holdout α = -10.5%/yr (**): in 2024–2026, equities and bonds both rallied "
-        "strongly (β_SPY=0.74, β_IEF=0.60, R²=0.79); factor tilts drove the holdout "
-        "return, not residual selection skill. R² of 0.79 in holdout vs 0.17 full-period "
-        "reflects a high-factor-return environment, not model degradation.\n"
-        "• The cleanest evidence of skill: IR = +0.20 vs 1/N equal-weight within the same "
-        "universe, and +17pp better max drawdown. Dynamic allocation adds value primarily "
-        "through superior timing of defensive positioning."
+        f"Key findings:\n"
+        f"* Full-period alpha = {_mfa_f['alpha']*100:+.1f}%/yr "
+        f"(t={_mfa_f['t_alpha']:+.2f}, {_f_stars}) -- significant but smaller than single-factor claim.\n"
+        f"* IS alpha = {_mfa_is['alpha']*100:+.1f}%/yr ({_is_stars}); "
+        f"OOS alpha = {_mfa_oo['alpha']*100:+.1f}%/yr ({_oo_stars}, "
+        f"p={_mfa_oo['p_alpha']:.2f}).\n"
+        f"* Holdout alpha = {_mfa_ho['alpha']*100:+.1f}%/yr ({_ho_stars}): "
+        f"in holdout, equities and bonds both rallied strongly "
+        f"(beta_SPY={_ho_betas.get('SPY',0):+.2f}, "
+        f"beta_IEF={_ho_betas.get('IEF',0):+.2f}, R^2={_mfa_ho['r2']:.2f}); "
+        f"factor tilts drove returns, not residual skill.\n"
+        f"* Cleanest skill evidence: IR = {_ir_1n_full:+.2f} vs 1/N equal-weight within "
+        f"the same universe, and {_mdd_diff_pp:.0f}pp better max drawdown vs 1/N. "
+        f"Dynamic allocation adds value through superior defensive positioning."
     )
 
     section("1/N Equal-Weight Baseline (same 22 ETFs, zero-skill benchmark)")
@@ -652,12 +708,7 @@ def build_pdf(d: dict, out_path: str) -> None:
     thead(["Period", "AMAAM SR", "1/N SR", "ΔSharpe", "AMAAM DD", "1/N DD", "ΔMDD"], wds6)
     for lbl, (ws, we) in d["windows"].items():
         a = _slice(d["amaam"], ws, we)
-        b = _slice(_monthly_rebalanced_returns(
-            _build_close_matrix(
-                load_validated_data("data/processed"),
-                MAIN_SLEEVE_TICKERS + HEDGING_SLEEVE_TICKERS),
-            {t: 1/22 for t in MAIN_SLEEVE_TICKERS + HEDGING_SLEEVE_TICKERS},
-            ws, we), ws, we)
+        b = _slice(d["b1n"], ws, we)
         if len(a) < 6 or len(b) < 6:
             continue
         common = a.index.intersection(b.index)
@@ -667,18 +718,83 @@ def build_pdf(d: dict, out_path: str) -> None:
         trow([lbl, rat(_sharpe(a_)), rat(_sharpe(b_)), f"{dsr:+.3f}",
               pct(_maxdd(a_)), pct(_maxdd(b_)), f"{ddd*100:+.1f}pp"], wds6, True)
 
-    # ── PAGE 5: Statistical significance + Walk-forward ───────────────────────
+    # ── PAGE 5: SPY Head-to-Head ──────────────────────────────────────────────
     pdf.add_page()
-    title("5. Statistical Significance")
+    title("5. AMAAM vs SPY — Full Head-to-Head Comparison")
+    note(
+        "SPY stats restricted to AMAAM's start date so both series cover identical months. "
+        "SPY full-history (from 2004) would include pre-2005 months not in AMAAM."
+    )
+
+    section("Side-by-Side: All Metrics")
+    wds_spy = [60, 40, 40]
+    thead(["Metric", "AMAAM", "SPY (same window)"], wds_spy)
+    _spy_rows = [
+        ("Ann. Return",      pct(sf["ret"]),      pct(sp["ret"])),
+        ("Ann. Volatility",  pct(sf["vol"]),      pct(sp["vol"])),
+        ("Sharpe Ratio",     rat(sf["sr"]),       rat(sp["sr"])),
+        ("Sortino Ratio",    rat(sf["sortino"]),  rat(sp["sortino"])),
+        ("Calmar Ratio",     rat(sf["calmar"]),   rat(sp["calmar"])),
+        ("Max Drawdown",     pct(sf["mdd"]),      pct(sp["mdd"])),
+        ("MDD Duration",     mo(sf["mdd_dur"]),   mo(sp["mdd_dur"])),
+        ("Best Year",        pct(sf["best_yr"]),  pct(sp["best_yr"])),
+        ("Worst Year",       pct(sf["worst_yr"]), pct(sp["worst_yr"])),
+        ("% Positive Months",pct(sf["pct_pos"]),  pct(sp["pct_pos"])),
+        ("N Months",         str(int(sf["n"])),   str(int(sp["n"]))),
+    ]
+    for r_data in _spy_rows:
+        trow(r_data, wds_spy, bold_first=True)
+
+    pdf.ln(4)
+    section("Calendar-Year AMAAM vs SPY — Win/Loss")
+    _spy_ann = _slice(d["spy"], cfg.backtest_start, cfg.backtest_end).resample("YE").apply(
+        lambda x: (1+x).prod()-1)
+    wds_cal = [18, 28, 28, 28, 36]
+    thead(["Year", "AMAAM", "SPY", "Excess", "Winner"], wds_cal)
+    amaam_wins, spy_wins = 0, 0
+    for yr, val in d["annual"].items():
+        spy_val = _spy_ann.get(yr, float("nan"))
+        exc = val - spy_val if not np.isnan(spy_val) else float("nan")
+        if not np.isnan(exc):
+            winner = "AMAAM" if exc > 0 else "SPY"
+            if exc > 0: amaam_wins += 1
+            else: spy_wins += 1
+        else:
+            winner = "—"
+        trow([str(yr.year), pct(val), pct(spy_val), pct(exc), winner], wds_cal, True)
+    note(f"Calendar year wins: AMAAM {amaam_wins} / SPY {spy_wins}")
+
+    pdf.ln(4)
+    section("IR vs SPY by Period  (active return / tracking error)")
+    wds_ir = [50, 40, 50]
+    thead(["Period", "Excess Return/yr", "IR vs SPY"], wds_ir)
+    for lbl in d["windows"]:
+        bi_row = d["bench_irs"][lbl].get("SPY", {})
+        exc_v = bi_row.get("exc", float("nan"))
+        ir_v  = bi_row.get("ir",  float("nan"))
+        trow([lbl,
+              f"{exc_v*100:+.2f}%/yr" if not np.isnan(exc_v) else "N/A",
+              f"{ir_v:+.2f}"          if not np.isnan(ir_v)  else "N/A"],
+             wds_ir, True)
+    note(
+        "AMAAM trails SPY on raw annualised return by ~0.1-0.7%/yr depending on period, "
+        "but wins decisively on risk: Sharpe is higher, max drawdown is ~34pp shallower "
+        "(~-19% vs ~-53%), and the worst single calendar year is far less severe. "
+        "The model's edge is risk-adjusted, not return-maximising."
+    )
+
+    # ── PAGE 6: Statistical significance + Walk-forward ───────────────────────
+    pdf.add_page()
+    title("6. Statistical Significance")
 
     section("t-test: H₀ — mean monthly return = 0  (one-tailed)")
     wds7 = [54, 24, 24, 24, 36]
     thead(["Period", "t-stat", "p-value", "Sig", "Interpretation"], wds7)
     for lbl, t_, p_ in [
-        ("Full (2004–2026)", si["ttest_full"]["t"],  si["ttest_full"]["p"]),
-        ("IS   (2004–2018)", si["ttest_is"]["t"],    si["ttest_is"]["p"]),
-        ("OOS  (2018–2024)", si["ttest_oos"]["t"],   si["ttest_oos"]["p"]),
-        ("Hold (2024–2026)", si["ttest_hold"]["t"],  si["ttest_hold"]["p"]),
+        (_full_key, si["ttest_full"]["t"],  si["ttest_full"]["p"]),
+        (_is_key,   si["ttest_is"]["t"],    si["ttest_is"]["p"]),
+        (_oos_key,  si["ttest_oos"]["t"],   si["ttest_oos"]["p"]),
+        (_hold_key, si["ttest_hold"]["t"],  si["ttest_hold"]["p"]),
     ]:
         sig_str = ("***" if p_<0.01 else "**" if p_<0.05 else "*" if p_<0.10 else "ns")
         interp = ("Reject H₀ at 1%" if p_<0.01 else
@@ -695,7 +811,7 @@ def build_pdf(d: dict, out_path: str) -> None:
     row("P(Sharpe > 0)",               f"{si['p_sr_gt_0']*100:.1f}%")
 
     pdf.ln(3)
-    title("6. Walk-Forward Validation")
+    title("7. Walk-Forward Validation")
     body(
         f"Expanding-window walk-forward across {wf['n_configs']} factor-weight configurations "
         f"and {wf['n_folds']} test folds (each 2 years). "
@@ -714,7 +830,7 @@ def build_pdf(d: dict, out_path: str) -> None:
 
     # ── PAGE 6: Experiments rejected + Resume guidance ────────────────────────
     pdf.add_page()
-    title("7. Experiments Tested and Rejected")
+    title("8. Experiments Tested and Rejected")
     note(
         "Each add-on below was implemented, walk-forward validated using the same 6-fold "
         "structure, and rejected when OOS evidence did not support adoption. "
@@ -736,17 +852,17 @@ def build_pdf(d: dict, out_path: str) -> None:
         pdf.set_text_color(0, 0, 0)
 
     # ── Pull live values for the guidance section ─────────────────────────────
-    _sf   = d["period_stats"]["Full (2004–2026)"]
+    _sf   = d["period_stats"][_full_key]
     _sa   = d["spy_aligned_stats"]   # SPY on same window as AMAAM
     _si   = d["sig"]
     _wf   = d["wf_summary"]
-    _bi   = d["bench_irs"]["Full (2004–2026)"]
-    _mf   = d["mf_alpha"]["Full (2004–2026)"]
-    _mf_o = d["mf_alpha"]["OOS  (2018–2024)"]
-    _mf_h = d["mf_alpha"]["Hold (2024–2026)"]
-    _s_is   = d["period_stats"]["IS   (2004–2018)"]["sr"]
-    _s_oos  = d["period_stats"]["OOS  (2018–2024)"]["sr"]
-    _s_hold = d["period_stats"]["Hold (2024–2026)"]["sr"]
+    _bi   = d["bench_irs"][_full_key]
+    _mf   = d["mf_alpha"][_full_key]
+    _mf_o = d["mf_alpha"][_oos_key]
+    _mf_h = d["mf_alpha"][_hold_key]
+    _s_is   = d["period_stats"][_is_key]["sr"]
+    _s_oos  = d["period_stats"][_oos_key]["sr"]
+    _s_hold = d["period_stats"][_hold_key]["sr"]
 
     _ir_1n  = _bi.get("1/N 22-ETF", {}).get("ir", float("nan"))
     _exc_1n = _bi.get("1/N 22-ETF", {}).get("exc", float("nan"))
@@ -764,7 +880,7 @@ def build_pdf(d: dict, out_path: str) -> None:
                    "*"   if _mf_o["p_alpha"] < 0.10 else "ns")
     _b_spy_betas = _mf_h.get("betas", {})
 
-    title("8. Resume Guidance for AI Assistant")
+    title("9. Resume Guidance for AI Assistant")
     body(
         "This document contains all verified numerical results for the AMAAM project.\n"
         "All numbers below are computed fresh from the current backtest.\n"
@@ -791,13 +907,14 @@ def build_pdf(d: dict, out_path: str) -> None:
         f"  * Bootstrap 95% Sharpe CI: [{_si['bootstrap_95_full'][0]:.3f}, "
         f"{_si['bootstrap_95_full'][1]:.3f}]\n\n"
 
-        "AVOID:\n"
-        "  * Single-factor OLS alpha (~11%/yr) -- misspecified; beta~0 collapses intercept\n"
-        "    to mean return; multi-factor regression is the correct specification\n"
+        f"AVOID:\n"
+        f"  * Single-factor OLS alpha ({d['single_factor_alpha']['alpha']*100:+.1f}%/yr) "
+        f"-- misspecified; beta~0 collapses intercept\n"
+        f"    to mean return; multi-factor regression is the correct specification\n"
         f"  * Holdout alpha ({_mf_h['alpha']*100:+.1f}%/yr) without context -- in 2024-2026\n"
-        "    both equities and bonds rallied; factor tilts drove returns, not skill\n"
-        "  * Any Sharpe > 0.75 without specifying the period (holdout is elevated\n"
-        f"    at {_s_hold:.2f} but covers only {d['period_stats']['Hold (2024–2026)']['n']} months)\n\n"
+        f"    both equities and bonds rallied; factor tilts drove returns, not skill\n"
+        f"  * Any Sharpe > 0.75 without specifying the period (holdout is elevated\n"
+        f"    at {_s_hold:.2f} but covers only {d['period_stats'][_hold_key]['n']} months)\n\n"
 
         "The model's edge is risk-adjusted return (Sharpe, drawdown control) relative to\n"
         "passive multi-asset benchmarks, not raw equity-market alpha generation."

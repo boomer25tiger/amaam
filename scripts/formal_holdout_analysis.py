@@ -1,5 +1,5 @@
 """
-Formal Holdout Analysis: 2024-01-01 through 2026-04-10.
+Formal Holdout Analysis: 2024-01-01 through cfg.backtest_end.
 
 This script is run EXACTLY ONCE and never re-run based on its results.
 It reports AMAAM performance on the truly unseen 2024-2026 window,
@@ -215,7 +215,7 @@ rows = [
 
 print(SEP)
 print(" FORMAL HOLDOUT ANALYSIS — AMAAM vs SPY")
-print(" Holdout window: 2024-01-01 → 2026-04-10  |  Run: ONCE, never re-run")
+print(f" Holdout window: 2024-01-01 -> {cfg.backtest_end}  |  Run: ONCE, never re-run")
 print(SEP)
 print()
 print("SECTION 1: PERFORMANCE SUMMARY")
@@ -366,7 +366,7 @@ allocs = result.allocations.copy()
 allocs.index = pd.to_datetime(allocs.index)
 
 ho_start = pd.Timestamp('2024-01-01')
-ho_end   = pd.Timestamp('2026-04-30')
+ho_end   = pd.Timestamp(cfg.backtest_end)
 
 allocs_ho = allocs.loc[(allocs.index >= ho_start) & (allocs.index <= ho_end)]
 

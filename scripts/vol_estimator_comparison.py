@@ -166,7 +166,7 @@ def main():
     IS_START  = cfg.backtest_start      # "2007-08-01"
     IS_END    = "2017-12-31"
     OOS_START = cfg.holdout_start       # "2018-01-01"
-    OOS_END   = cfg.backtest_end        # "2026-04-10"
+    OOS_END   = cfg.backtest_end        # "2026-03-31"
     FULL_START = cfg.backtest_start
 
     # Window matches momentum_lookback for consistency with prior GK-21 test

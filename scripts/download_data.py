@@ -10,7 +10,7 @@ Usage (from project root)::
 
     python scripts/download_data.py                   # first-time download
     python scripts/download_data.py --force           # force re-download
-    python scripts/download_data.py --start 2004-01-01 --end 2026-04-10
+    python scripts/download_data.py --start 2004-01-01 --end 2026-03-31
     python scripts/download_data.py -v                # verbose DEBUG output
     python scripts/download_data.py --no-proxy        # skip proxy construction
 """

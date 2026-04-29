@@ -425,7 +425,7 @@ stress_periods = [
     ("China/HY Selloff",  "2015-08-01", "2016-02-29"),
     ("COVID Crash",       "2020-02-01", "2020-03-31"),
     ("2022 Rate Shock",   "2022-01-01", "2022-12-31"),
-    ("2025 Tariff Shock", "2025-02-01", "2026-04-30"),
+    ("2025 Tariff Shock", "2025-02-01", cfg.backtest_end),
 ]
 
 print(f"  {'Period':<22}  {'AMAAM Cum. Ret':>14}  {'SPY Cum. Ret':>13}")

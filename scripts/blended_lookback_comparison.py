@@ -34,8 +34,8 @@ logging.basicConfig(
 IS_START  = "2004-01-01"
 IS_END    = "2018-01-01"
 OOS_START = "2018-01-01"
-OOS_END   = "2026-04-10"
-FULL_END  = "2026-04-10"
+OOS_END   = ModelConfig().backtest_end
+FULL_END  = ModelConfig().backtest_end
 
 # Walk-forward folds: (name, train_start, train_end, test_start, test_end)
 FOLDS = [

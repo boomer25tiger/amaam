@@ -32,7 +32,7 @@ logging.basicConfig(
 IS_START   = "2004-01-01"
 IS_END     = "2017-12-31"
 FULL_START = "2004-01-01"
-FULL_END   = "2026-04-10"
+FULL_END   = ModelConfig().backtest_end
 
 WF_WINDOWS = [
     ("WF1", "2010-01", "2011-12"),
