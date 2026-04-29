@@ -411,14 +411,14 @@ During Phase 1, the following checks must be performed on all downloaded data:
 ### 5.1 Backtest Period
 
 - **Start**: 2004-01-01 data load; first live signal month approximately 2004-06
-- **End**: April 10, 2026 (`backtest_end = "2026-04-10"`)
-- **Total**: 250 months (~20.8 years)
+- **End**: March 31, 2026 (`backtest_end = "2026-03-31"`)
+- **Total**: 249 months (~20.75 years)
 
 ### 5.2 Train/Test Split
 
 - **In-sample (development) period**: 2004-01 — 2017-12 (151 months, ~12.6 years). `holdout_start = "2018-01-01"`.
-- **Out-of-sample / holdout period**: 2018-01 — 2026-04 (98 months, ~8.2 years).
-- **Deep holdout** (run-once, not used in any design decision): 2024-01 — 2026-04 (28 months).
+- **Out-of-sample / holdout period**: 2018-01 — 2026-03 (99 months, ~8.25 years).
+- **Deep holdout** (run-once, not used in any design decision): 2024-01 — 2026-03 (27 months).
 - All design decisions are finalized using only the in-sample period. The holdout is run ONCE at the end.
 
 ### 5.3 Execution Assumptions
@@ -479,47 +479,40 @@ All metrics computed for the AMAAM and each benchmark, across all transaction co
 | Average Monthly Turnover | Mean of monthly turnover values |
 | Annual Turnover | Sum of monthly turnovers, averaged across years |
 
-**Computed results — full backtest 2004-01-01 to 2026-04-10, 5 bps one-way transaction cost:**
+**Computed results — full backtest 2004-01-01 to 2026-03-31 (n=249 months), 5 bps one-way transaction cost:**
 
-| Metric | AMAAM | SPY | 60/40 | 7Twelve |
-|--------|------:|----:|------:|--------:|
-| Annualized Return | 10.68% | 10.23% | 7.67% | 7.40% |
-| Annualized Volatility | 12.40% | 16.24% | 10.18% | 12.00% |
-| Sharpe Ratio (rf=2%) | 0.723 | 0.562 | 0.584 | 0.493 |
-| Sortino Ratio | 1.437 | 0.934 | 1.142 | 0.910 |
-| Calmar Ratio | 0.578 | 0.193 | 0.231 | 0.197 |
-| Max Drawdown | −18.47% | −52.90% | −33.21% | −37.54% |
-| MDD Duration (months) | 27 | 53 | 38 | 27 |
-| Best Month | +9.73% | +15.64% | +10.29% | +15.31% |
-| Worst Month | −11.01% | −19.89% | −12.27% | −17.31% |
-| Best Calendar Year | +37.36% | +39.06% | +27.93% | +43.22% |
-| Worst Calendar Year | −13.82% | −43.22% | −27.44% | −31.92% |
-| % Positive Months | 62.8% | 65.0% | 66.2% | 63.5% |
-| % Positive Years | 86.4% | 87.0% | 87.0% | 82.6% |
-| Win/Loss Payoff Ratio | 1.108× | 0.912× | 0.940× | 0.988× |
-| Skewness | −0.222 | −0.705 | −0.615 | −0.805 |
-| Excess Kurtosis | +0.032 | +2.805 | +2.969 | +5.658 |
-| Avg Monthly Turnover | 74.5% | — | — | — |
-| Total Return | +705.36% | — | — | — |
+| Metric | AMAAM | SPY (aligned) |
+|--------|------:|----:|
+| Annualized Return | +10.73% | +10.78% |
+| Annualized Volatility | 12.36% | 16.13% |
+| Sharpe Ratio (rf=2%) | 0.706 | 0.527 |
+| Sortino Ratio | 1.193 | — |
+| Calmar Ratio | 0.575 | 0.204 |
+| Max Drawdown | −18.67% | −52.90% |
+| Best Calendar Year | +37.1% | — |
+| Worst Calendar Year | −14.0% | — |
+| % Positive Months | 63.1% | — |
+| Avg Monthly Turnover | 74.47% | — |
+
+SPY stats are restricted to the same start date as AMAAM (first valid AMAAM month ≈ Jul 2005) so the comparison is on an identical date window.
 
 **Sub-period and validation results (AMAAM only):**
 
-| Period | Sharpe |
-|--------|--------|
-| In-sample 2004–2018 (151 months) | 0.761 |
-| Out-of-sample 2018–2026 (98 months) | 0.671 |
-| Deep holdout 2024–2026 (28 months, run-once) | 1.103 |
-| Walk-forward stacked OOS (6 folds) | 0.739 |
+| Period | N Months | Sharpe |
+|--------|------:|--------|
+| In-sample 2004–2018 | 150 | 0.638 |
+| Out-of-sample 2018–2024 | 72 | 0.624 |
+| Deep holdout 2024–2026-03 (run-once) | 27 | 1.455 |
+| Walk-forward stacked OOS (6 folds, canonical wM=0.65) | — | 0.719 |
 
-**Statistical significance:**
+**Statistical significance (full period, n=249):**
 
 | Test | Result |
 |------|--------|
-| Bootstrap 95% CI (Sharpe) | [0.302, 1.127] — excludes zero |
-| Permutation test Z vs SPY | Z = +4.06, p ≈ 0 |
-| OLS Alpha vs SPY | +11.55%/yr, p = 0.0001 |
-| Beta vs SPY | −0.003 (not statistically different from zero) |
-| R² vs SPY | ≈ 0 |
+| Bootstrap 95% CI (Sharpe) | [0.349, 1.051] — excludes zero |
+| Sign-flip permutation test | Z = +4.20, p < 0.0001 |
+| Multi-factor OLS alpha (SPY+IEF+DBC+GLD) | +7.77%/yr, p < 0.01 (**) |
+| Single-factor OLS alpha vs SPY only | ~+10.7%/yr (misspecified; beta~0 collapses intercept to mean return) |
 
 ---
 
@@ -741,7 +734,7 @@ class ModelConfig:
 
     # ── Backtest period ───────────────────────────────────────────────────────
     backtest_start: str = "2004-01-01"
-    backtest_end: str = "2026-04-10"
+    backtest_end: str = "2026-03-31"
     holdout_start: str = "2018-01-01"
 
     # ── EWMA initialisation ───────────────────────────────────────────────────
@@ -1072,7 +1065,7 @@ Document these in the README:
 
 14. **Walk-forward Fold 3 underperformance**: The walk-forward winner for Fold 3 (test window 2017–2018) underperforms the equal-weight baseline (SR 0.287 vs 0.460). The 2017–2018 low-volatility / vol-shock regime (XIV implosion, Feb 2018) penalised the volatility-sensitive ranking. This period represents a known regime risk for the model.
 
-15. **Holdout beta during the April 2025 tariff shock**: Over the 28-month deep holdout (2024-01 to 2026-04) the rolling beta vs SPY reached −0.355 during the April 2025 trade-policy selloff as the model rotated defensively. This inflates the holdout Sharpe (1.103) relative to a more benign environment and should not be extrapolated.
+15. **Holdout beta during the April 2025 tariff shock**: Over the 27-month deep holdout (2024-01 to 2026-03) the rolling beta vs SPY reached −0.355 during the April 2025 trade-policy selloff as the model rotated defensively. This inflates the holdout Sharpe (1.455) relative to a more benign environment and should not be extrapolated. Note: backtest_end is set to 2026-03-31; the partial April 2026 window (tariff-shock selloff) is excluded to avoid month-boundary distortion.
 
 ---
 
